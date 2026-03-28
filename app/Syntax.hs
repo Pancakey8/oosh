@@ -1,6 +1,7 @@
 module Syntax where
 
 import Data.Char
+import Data.List
 import Text.Parsec
 import Text.Parsec.String
 
@@ -13,7 +14,6 @@ data Literal
   = NumLit String String
   | StrLit [StrContent]
   | VarLit String
-  | KwLit String
   deriving (Show)
 
 data Operator = OpPipe | OpPlus | OpMinus | OpAst | OpSlash | OpJuxta
@@ -22,6 +22,7 @@ data Operator = OpPipe | OpPlus | OpMinus | OpAst | OpSlash | OpJuxta
 data Expr
   = LitExpr Literal
   | BinaryExpr Operator Expr Expr
+  | CommandExpr String [[StrContent]]
   deriving (Show)
 
 data Statement
@@ -35,23 +36,14 @@ numberLit = do
   frac <- (char '.' >> many1 digit) <|> pure ""
   pure $ NumLit whole frac
 
-reservedMinimal :: [Char]
-reservedMinimal = ['\'', '"', '(', ')', '[', ']', '$']
-
-reservedExtra :: [Char]
-reservedExtra = ['+', '-', '*', '/', '|']
+reserved :: [Char]
+reserved = ['\'', '"', '(', ')', '[', ']', '$'] ++ map (\(a, _, _) -> head a) operators
 
 identCharStart :: Char -> Bool
-identCharStart c = not (isSpace c || isDigit c || c `elem` reservedMinimal || c `elem` reservedExtra)
+identCharStart c = not (isSpace c || isDigit c || c `elem` reserved)
 
 identChar :: Char -> Bool
 identChar c = identCharStart c || isDigit c
-
-kwCharStart :: Char -> Bool
-kwCharStart c = not (isSpace c || isDigit c || c `elem` reservedMinimal)
-
-kwChar :: Char -> Bool
-kwChar c = kwCharStart c || isDigit c
 
 varLit :: Parser Literal
 varLit = do
@@ -59,12 +51,6 @@ varLit = do
   first <- satisfy identCharStart
   name <- many (satisfy identChar)
   pure $ VarLit (first : name)
-
-kwLit :: Parser Literal
-kwLit = do
-  first <- satisfy kwCharStart
-  name <- many (satisfy kwChar)
-  pure $ KwLit (first : name)
 
 stringLit :: Parser Literal
 stringLit = do
@@ -77,7 +63,7 @@ stringLit = do
   pure $ StrLit contents
 
 literal :: Parser Literal
-literal = stringLit <|> numberLit <|> varLit <|> kwLit
+literal = stringLit <|> numberLit <|> varLit
 
 hSpaces :: Parser ()
 hSpaces = skipMany (oneOf [' ', '\t'])
@@ -88,16 +74,63 @@ lexeme p = hSpaces *> p <* hSpaces
 symbol :: String -> Parser String
 symbol s = lexeme (string s)
 
+commandExpr :: Parser Expr
+commandExpr = do
+  cmdName <- getCmdName
+
+  CommandExpr cmdName . filter (not . null) <$> getArgs
+  where
+    getCmdName :: Parser String
+    getCmdName = identArg
+
+    getArgs :: Parser [[StrContent]]
+    getArgs = manyTill getArg (try terminator)
+
+    terminator :: Parser String
+    terminator = lookAhead (symbol "|" <|> string "\n" <|> (eof >> pure ""))
+  
+    isWordEnd :: Char -> Bool
+    isWordEnd c = isSpace c || c `elem` ['\n', '|', '"', '\'']
+
+    getArg :: Parser [StrContent]
+    getArg = varArg <|> exactArg <|> quoteArg
+
+    identArg :: Parser String
+    identArg = do
+        first <- satisfy identCharStart
+        name <- many (satisfy identChar)
+        pure (first : name)
+
+    varArg :: Parser [StrContent]
+    varArg = do
+      _ <- lookAhead $ char '$'
+      singleton . Subst <$> varLit
+
+    exactArg :: Parser [StrContent]
+    exactArg = do
+      sp <- many (oneOf [' ', '\t'])
+      if not (null sp)
+        then pure []
+        else do
+          word <- many1 (satisfy (not . isWordEnd))
+          pure [Exact word]
+
+    quoteArg :: Parser [StrContent]
+    quoteArg = do
+      StrLit contents <- stringLit <* parserTrace "String"
+      pure contents
+
 nudExpr :: Parser Expr
 nudExpr =
   (LitExpr <$> literal)
+    <|> commandExpr
     <|> (symbol "(" *> ledExpr 0 <* symbol ")")
 
 operators :: [(String, Operator, Int)]
 operators = [("|", OpPipe, 10), ("+", OpPlus, 20), ("-", OpMinus, 20), ("*", OpAst, 30), ("/", OpSlash, 30)]
 
 juxtaPrec :: Int
-juxtaPrec = 30
+juxtaPrec = 40
 
 ledExpr :: Int -> Parser Expr
 ledExpr minPrec = do
@@ -112,16 +145,13 @@ ledExpr minPrec = do
 
     go :: Expr -> Parser Expr
     go left = do
-      maybeOp <- optionMaybe $ try $ do
-        hSpaces
-        opStr <- choice (map (try . string . fst3) operators)
-        _ <- satisfy isSpace
-        return opStr
+      maybeOp <- optionMaybe $ try $ lookAhead $ choice (map (try . symbol . fst3) operators)
       case maybeOp of
         Just opStr -> do
           let (_, opKind, prec) = findOp opStr
           if prec >= minPrec
             then do
+              _ <- symbol opStr
               right <- ledExpr (prec + 1)
               go (BinaryExpr opKind left right)
             else pure left
