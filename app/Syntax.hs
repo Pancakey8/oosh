@@ -4,25 +4,39 @@ import Data.Char
 import Data.List
 import Text.Parsec
 import Text.Parsec.String
+import Control.Applicative (empty)
 
 data StrContent
   = Exact String
   | Subst Literal
   deriving (Show)
 
+data PathContent
+  = ExactPath String 
+  | Glob 
+  | RecGlob
+  | StringPath [StrContent]
+  deriving (Show)
+
 data Literal
   = NumLit String String
   | StrLit [StrContent]
   | VarLit String
+  | PathLit [PathContent]
   deriving (Show)
 
 data Operator = OpPipe | OpPlus | OpMinus | OpAst | OpSlash | OpJuxta
   deriving (Show)
 
+data CommandName
+  = ExePath [PathContent]
+  | Auto String
+  deriving (Show)
+
 data Expr
   = LitExpr Literal
   | BinaryExpr Operator Expr Expr
-  | CommandExpr String [[StrContent]]
+  | CommandExpr CommandName [[StrContent]]
   deriving (Show)
 
 data Statement
@@ -37,7 +51,7 @@ numberLit = do
   pure $ NumLit whole frac
 
 reserved :: [Char]
-reserved = ['\'', '"', '(', ')', '[', ']', '$'] ++ map (\(a, _, _) -> head a) operators
+reserved = ['\'', '"', '(', ')', '[', ']', '$', '.', ':', ','] ++ map (\(a, _, _) -> head a) operators
 
 identCharStart :: Char -> Bool
 identCharStart c = not (isSpace c || isDigit c || c `elem` reserved)
@@ -62,8 +76,19 @@ stringLit = do
   _ <- char start
   pure $ StrLit contents
 
+pathLit :: Parser Literal
+pathLit = do
+  start <- char ':'
+  let glob = try (string "**" >> pure RecGlob) <|> (char '*' >> pure Glob)
+      exact = ExactPath <$> many1 (satisfy (\c -> not (isSpace c || c == '*' || c == '\'' || c == '"')))
+      str = do
+        StrLit contents <- stringLit
+        pure $ StringPath contents
+      path = many1 (glob <|> exact <|> str)
+  PathLit <$> path
+
 literal :: Parser Literal
-literal = stringLit <|> numberLit <|> varLit
+literal = stringLit <|> numberLit <|> varLit <|> pathLit
 
 hSpaces :: Parser ()
 hSpaces = skipMany (oneOf [' ', '\t'])
@@ -80,26 +105,31 @@ commandExpr = do
 
   CommandExpr cmdName . filter (not . null) <$> getArgs
   where
-    getCmdName :: Parser String
-    getCmdName = identArg
+    getCmdName :: Parser CommandName
+    getCmdName = pathArg <|> identArg
 
     getArgs :: Parser [[StrContent]]
     getArgs = manyTill getArg (try terminator)
 
     terminator :: Parser String
-    terminator = lookAhead (symbol "|" <|> string "\n" <|> (eof >> pure ""))
-  
+    terminator = lookAhead (symbol "|" <|> string "\n" <|> (eof >> pure "") <|> string ")")
+
     isWordEnd :: Char -> Bool
-    isWordEnd c = isSpace c || c `elem` ['\n', '|', '"', '\'']
+    isWordEnd c = isSpace c || c `elem` ['\n', '|', '"', '\'', ')']
 
     getArg :: Parser [StrContent]
     getArg = varArg <|> exactArg <|> quoteArg
 
-    identArg :: Parser String
+    identArg :: Parser CommandName
     identArg = do
-        first <- satisfy identCharStart
-        name <- many (satisfy identChar)
-        pure (first : name)
+      first <- satisfy identCharStart
+      name <- many (satisfy identChar)
+      pure $ Auto (first : name)
+
+    pathArg :: Parser CommandName
+    pathArg = do
+      PathLit path <- pathLit
+      pure (ExePath path)
 
     varArg :: Parser [StrContent]
     varArg = do
@@ -117,14 +147,16 @@ commandExpr = do
 
     quoteArg :: Parser [StrContent]
     quoteArg = do
-      StrLit contents <- stringLit <* parserTrace "String"
+      StrLit contents <- stringLit
       pure contents
 
-nudExpr :: Parser Expr
-nudExpr =
-  (LitExpr <$> literal)
-    <|> commandExpr
-    <|> (symbol "(" *> ledExpr 0 <* symbol ")")
+nudExpr :: Bool -> Parser Expr
+nudExpr allowCmd =
+    (if allowCmd
+      then commandExpr
+      else empty)
+    <|> (LitExpr <$> literal)
+    <|> (symbol "(" *> ledExpr True 0 <* symbol ")")
 
 operators :: [(String, Operator, Int)]
 operators = [("|", OpPipe, 10), ("+", OpPlus, 20), ("-", OpMinus, 20), ("*", OpAst, 30), ("/", OpSlash, 30)]
@@ -132,9 +164,9 @@ operators = [("|", OpPipe, 10), ("+", OpPlus, 20), ("-", OpMinus, 20), ("*", OpA
 juxtaPrec :: Int
 juxtaPrec = 40
 
-ledExpr :: Int -> Parser Expr
-ledExpr minPrec = do
-  left <- lexeme nudExpr
+ledExpr :: Bool -> Int -> Parser Expr
+ledExpr allowCmd minPrec = do
+  left <- lexeme (nudExpr allowCmd)
   go left
   where
     fst3 :: (a, b, c) -> a
@@ -152,16 +184,18 @@ ledExpr minPrec = do
           if prec >= minPrec
             then do
               _ <- symbol opStr
-              right <- ledExpr (prec + 1)
+              right <- ledExpr (case opKind of
+                                  OpPipe -> True
+                                  _ -> False) (prec + 1)
               go (BinaryExpr opKind left right)
             else pure left
         Nothing -> do
-          next <- optionMaybe (lookAhead (lexeme nudExpr))
+          next <- optionMaybe (lookAhead (lexeme (nudExpr False)))
           case next of
             Just _ ->
               if juxtaPrec >= minPrec
                 then do
-                  right <- ledExpr juxtaPrec
+                  right <- ledExpr False juxtaPrec
                   go (BinaryExpr OpJuxta left right)
                 else pure left
             Nothing -> pure left
@@ -171,8 +205,8 @@ setVarStmt = do
   first <- satisfy identCharStart
   name <- many (satisfy identChar)
   _ <- symbol "="
-  rhs <- ledExpr 0
+  rhs <- ledExpr True 0
   pure (SetVarStmt (first : name) rhs)
 
 statement :: Parser Statement
-statement = try setVarStmt <|> (ExprStmt <$> ledExpr 0)
+statement = try setVarStmt <|> (ExprStmt <$> ledExpr True 0)
