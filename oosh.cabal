@@ -61,7 +61,10 @@ executable oosh
     main-is:          Main.hs
 
     -- Modules included in this executable, other than Main.
-    other-modules:    Syntax
+    other-modules:    Syntax,
+                      Eval,
+                      Bridge,
+                      IR
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
@@ -69,10 +72,19 @@ executable oosh
     -- Other library packages from which modules are imported.
     build-depends:    base ^>=4.21.0.0,
                       haskeline,
-                      parsec
+                      parsec,
+                      mtl
 
     -- Directories containing source files.
     hs-source-dirs:   app
+
+    c-sources:        csrc/wrapper.c
+
+    cc-options: -g -O0
+
+    include-dirs:     csrc
+
+    includes:         wrapper.h
 
     -- Base language which the package is written in.
     default-language: GHC2024

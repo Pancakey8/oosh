@@ -41,6 +41,7 @@ data Expr
 
 data Statement
   = ExprStmt Expr
+  | DefVarStmt String Expr
   | SetVarStmt String Expr
   deriving (Show)
 
@@ -51,7 +52,7 @@ numberLit = do
   pure $ NumLit whole frac
 
 reserved :: [Char]
-reserved = ['\'', '"', '(', ')', '[', ']', '$', '.', ':', ','] ++ map (\(a, _, _) -> head a) operators
+reserved = ['\'', '"', '(', ')', '[', ']', '$', '.', ':', ',', '='] ++ map (\(a, _, _) -> head a) operators
 
 identCharStart :: Char -> Bool
 identCharStart c = not (isSpace c || isDigit c || c `elem` reserved)
@@ -195,18 +196,32 @@ ledExpr allowCmd minPrec = do
             Just _ ->
               if juxtaPrec >= minPrec
                 then do
-                  right <- ledExpr False juxtaPrec
+                  right <- ledExpr False (juxtaPrec + 1)
                   go (BinaryExpr OpJuxta left right)
                 else pure left
             Nothing -> pure left
 
-setVarStmt :: Parser Statement
-setVarStmt = do
+defVarStmt :: Parser Statement
+defVarStmt = do
   first <- satisfy identCharStart
   name <- many (satisfy identChar)
   _ <- symbol "="
   rhs <- ledExpr True 0
-  pure (SetVarStmt (first : name) rhs)
+  pure (DefVarStmt (first : name) rhs)
+
+setVarStmt :: Parser Statement
+setVarStmt = do
+  VarLit name <- varLit
+  _ <- symbol "="
+  rhs <- ledExpr True 0
+  pure (SetVarStmt name rhs)
 
 statement :: Parser Statement
-statement = try setVarStmt <|> (ExprStmt <$> ledExpr True 0)
+statement = try setVarStmt <|> try defVarStmt <|> (ExprStmt <$> ledExpr True 0)
+
+program :: Parser [Statement]
+program = do
+  _ <- spaces
+  prog <- many (statement <* spaces)
+  _ <- eof
+  pure prog
