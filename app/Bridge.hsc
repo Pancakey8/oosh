@@ -75,11 +75,6 @@ instance Storable IRInstr where
     (#poke struct IRInstr, data.path.parts) ptr array
     (#poke struct IRInstr, data.path.parts_length) ptr len
 
-  poke ptr (PushFn s) = do
-    (#poke struct IRInstr, kind) ptr ((#const PushFn) :: CInt)
-    cstr <- newCString s
-    (#poke struct IRInstr, data.fn) ptr cstr
-
   poke ptr (LoadVar s) = do
     (#poke struct IRInstr, kind) ptr ((#const LoadVar) :: CInt)
     cstr <- newCString s

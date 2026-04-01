@@ -14,6 +14,36 @@ char *stringify_op(enum Operator op) {
   }
 }
 
+void stringify_tmp(struct TemplatePart const *part, char *out,
+                   size_t out_size) {
+  switch (part->kind) {
+  case TempExact: {
+    snprintf(out, out_size, "Exact '%s'", part->data.exact);
+  } break;
+  case TempVar: {
+    snprintf(out, out_size, "Var %s", part->data.var);
+  } break;
+  }
+}
+
+void stringify_path(struct PathPart const *part, char *out,
+                   size_t out_size) {
+  switch (part->kind) {
+  case PathExact: {
+    snprintf(out, out_size, "Exact '%s'", part->data.exact);
+  } break;
+  case PathGlob: {
+    snprintf(out, out_size, "Glob");
+  } break;
+  case PathRecGlob: {
+    snprintf(out, out_size, "RecGlob");
+  } break;
+  case PathTmp: {
+    snprintf(out, out_size, "Template [%zu]", part->data.tmp.parts_length);
+  } break;
+  }
+}
+
 void print_instruction(struct IRInstr const *instr) {
   switch (instr->kind) {
   case PushNum: {
@@ -21,15 +51,21 @@ void print_instruction(struct IRInstr const *instr) {
   } break;
 
   case PushTemplate: {
-    printf("PushTemplate TODO\n");
+    printf("PushTemplate\n");
+    char out[1024];
+    for (size_t i = 0; i < instr->data.tmp.parts_length; ++i) {
+      stringify_tmp(&instr->data.tmp.parts[i], out, 1024);
+      printf("- %s\n", out);
+    }
   } break;
 
   case PushPath: {
-    printf("PushPath TODO\n");
-  } break;
-
-  case PushFn: {
-    printf("PushFn %s\n", instr->data.fn);
+    printf("PushPath\n");
+    char out[1024];
+    for (size_t i = 0; i < instr->data.path.parts_length; ++i) {
+      stringify_path(&instr->data.path.parts[i], out, 1024);
+      printf("- %s\n", out);
+    }
   } break;
 
   case LoadVar: {

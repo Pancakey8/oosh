@@ -18,7 +18,6 @@ data IRInstr
   = PushNum Double
   | PushTemplate [TemplatePart]
   | PushPath [PathPart]
-  | PushFn String
   | LoadVar String
   | StoreVar String
   | DefineVar String
