@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-} -- Orphans are intentional
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE EmptyDataDecls #-}
 module Bridge where
@@ -6,90 +7,123 @@ import Foreign
 import Foreign.C.String
 import Foreign.C.Types
 import Control.Monad
-import Foreign.Marshal.Utils (with)
-import Numeric (showHex)
 
-import Syntax
+import IR
+import Syntax (Operator (..))
 
 #include "wrapper.h"
 
-instance Storable StrContent where
-    sizeOf _    = #size struct StrContent
-    alignment _ = #alignment struct StrContent
-    
-    poke ptr (Exact s) = do
-        (#poke struct StrContent, kind) ptr ((#const Exact) :: Word8)
-        cstr <- newCString s
-        (#poke struct StrContent, data.exact) ptr cstr
-        
-    poke ptr (Subst lit) = do
-        (#poke struct StrContent, kind) ptr ((#const Subst) :: Word8)
-        litPtr <- malloc
-        poke litPtr lit
-        (#poke struct StrContent, data.subst) ptr litPtr
+instance Storable TemplatePart where
+  sizeOf _ = #size struct TemplatePart
+  alignment _ = #alignment struct TemplatePart
 
-    peek _ = error "Peek not implemented for StrContent"
+  poke ptr (TempExact s) = do
+    (#poke struct TemplatePart, kind) ptr ((#const TempExact) :: CInt)
+    cstr <- newCString s
+    (#poke struct TemplatePart, data.exact) ptr cstr
 
-data NumLitData = NumLitData (Ptr CChar) (Ptr CChar)
+  poke ptr (TempVar s) = do
+    (#poke struct TemplatePart, kind) ptr ((#const TempVar) :: CInt)
+    cstr <- newCString s
+    (#poke struct TemplatePart, data.var) ptr cstr
 
-instance Storable NumLitData where
-  sizeOf _ =
-    #size struct NumLitData
-  alignment _ =
-    #alignment struct NumLitData
+  peek _ = error "C->HS interaction not implemented"
 
-  poke ptr (NumLitData whole frac) = do
-    (#poke struct NumLitData, whole) ptr whole
-    (#poke struct NumLitData, frac) ptr frac
+instance Storable PathPart where
+  sizeOf _ = #size struct PathPart
+  alignment _ = #alignment struct TemplatePart
 
-data StrLitData = StrLitData (Ptr StrContent) CSize
+  poke ptr (PathExact s) = do
+    (#poke struct PathPart, kind) ptr ((#const PathExact) :: CInt)
+    cstr <- newCString s
+    (#poke struct PathPart, data.exact) ptr cstr
 
-instance Storable StrLitData where
-  sizeOf _ =
-    #size struct StrLitData
-  alignment _ =
-    #alignment struct StrLitData
+  poke ptr PathGlob = (#poke struct PathPart, kind) ptr ((#const PathGlob) :: CInt)
+  poke ptr PathRecGlob = (#poke struct PathPart, kind) ptr ((#const PathRecGlob) :: CInt)
 
-  poke ptr (StrLitData contents len) = do
-    (#poke struct StrLitData, contents) ptr contents
-    (#poke struct StrLitData, contents_len) ptr len
+  poke ptr (PathTmp ts) = do
+    (#poke struct PathPart, kind) ptr ((#const PathTmp) :: CInt)
+    let len = length ts
+    array <- mallocArray len :: IO (Ptr TemplatePart)
+    forM_ (zip [0..] ts) $ \(i, t) -> pokeElemOff array i t
+    (#poke struct PathPart, data.tmp.parts) ptr array
+    (#poke struct PathPart, data.tmp.parts_length) ptr len
 
-instance Storable Literal where
-    sizeOf _    = #size struct Literal
-    alignment _ = #alignment struct Literal
+  peek _ = error "C->HS interaction not implemented"
 
-    poke ptr (NumLit w f) = do
-        (#poke struct Literal, kind) ptr ((#const NumLit) :: Word8)
-        cWhole <- newCString w
-        cFrac  <- newCString f
-        (#poke struct Literal, data.num) ptr (NumLitData cWhole cFrac)
+instance Storable IRInstr where
+  sizeOf _ = #size struct IRInstr
+  alignment _ = #alignment struct IRInstr
 
-    poke ptr (StrLit contents) = do
-        (#poke struct Literal, kind) ptr ((#const StrLit) :: Word8)
-        let len = length contents
-        arrayPtr <- mallocArray len :: IO (Ptr StrContent)
-        forM_ (zip [0..] contents) $ \(i, c) -> do
-          pokeElemOff arrayPtr i c
-        (#poke struct Literal, data.str) ptr (StrLitData arrayPtr (fromIntegral len))
+  poke ptr (PushNum n) = do
+    (#poke struct IRInstr, kind) ptr ((#const PushNum) :: CInt)
+    (#poke struct IRInstr, data.num) ptr n
 
-    poke ptr (VarLit name) = do
-        (#poke struct Literal, kind) ptr ((#const VarLit) :: Word8)
-        cstr <- newCString name
-        (#poke struct Literal, data.var) ptr cstr
+  poke ptr (PushTemplate ts) = do
+    (#poke struct IRInstr, kind) ptr ((#const PushTemplate) :: CInt)
+    let len = length ts
+    array <- mallocArray len :: IO (Ptr TemplatePart)
+    forM_ (zip [0..] ts) $ \(i, t) -> pokeElemOff array i t
+    (#poke struct IRInstr, data.tmp.parts) ptr array
+    (#poke struct IRInstr, data.tmp.parts_length) ptr len
 
-    poke _ (PathLit _) = error "TODO: PathContent not implemented"
+  poke ptr (PushPath ts) = do
+    (#poke struct IRInstr, kind) ptr ((#const PushPath) :: CInt)
+    let len = length ts
+    array <- mallocArray len :: IO (Ptr PathPart)
+    forM_ (zip [0..] ts) $ \(i, t) -> pokeElemOff array i t
+    (#poke struct IRInstr, data.path.parts) ptr array
+    (#poke struct IRInstr, data.path.parts_length) ptr len
 
-    peek _ = error "Peek not implemented for Literal"
+  poke ptr (PushFn s) = do
+    (#poke struct IRInstr, kind) ptr ((#const PushFn) :: CInt)
+    cstr <- newCString s
+    (#poke struct IRInstr, data.fn) ptr cstr
 
-foreign import ccall "stringifyLiteral" c_stringifyLiteral :: Ptr () -> IO ()
+  poke ptr (LoadVar s) = do
+    (#poke struct IRInstr, kind) ptr ((#const LoadVar) :: CInt)
+    cstr <- newCString s
+    (#poke struct IRInstr, data.load) ptr cstr
 
-dumpBytes :: Ptr a -> Int -> IO ()
-dumpBytes p n = do
-  bs <- peekArray n (castPtr p :: Ptr Word8)
-  putStrLn $ unwords (map (\b -> let h = showHex b "" in if length h == 1 then '0':h else h) bs)
+  poke ptr (StoreVar s) = do
+    (#poke struct IRInstr, kind) ptr ((#const StoreVar) :: CInt)
+    cstr <- newCString s
+    (#poke struct IRInstr, data.store) ptr cstr
 
-stringifyLiteral :: Literal -> IO ()
-stringifyLiteral lit = do
-  ptr <- malloc :: IO (Ptr Literal) -- TODO: This leaks
-  poke ptr lit
-  c_stringifyLiteral (castPtr ptr)
+  poke ptr (DefineVar s) = do
+    (#poke struct IRInstr, kind) ptr ((#const DefineVar) :: CInt)
+    cstr <- newCString s
+    (#poke struct IRInstr, data.define) ptr cstr
+
+  poke ptr (CallCommand n) = do
+    (#poke struct IRInstr, kind) ptr ((#const CallCommand) :: CInt)
+    (#poke struct IRInstr, data.call_cmd) ptr (fromIntegral n :: CSize)
+
+  poke ptr (CallFunction n) = do
+    (#poke struct IRInstr, kind) ptr ((#const CallFunction) :: CInt)
+    (#poke struct IRInstr, data.call_fn) ptr (fromIntegral n :: CSize)
+
+  poke ptr PipeTo = do
+    (#poke struct IRInstr, kind) ptr ((#const PipeTo) :: CInt)
+
+  poke ptr (ApplyOp op) = do
+    (#poke struct IRInstr, kind) ptr ((#const ApplyOp) :: CInt)
+    (#poke struct IRInstr, data.apply_op) ptr
+      ((case op of
+         OpPlus -> (#const OpPlus)
+         OpMinus -> (#const OpMinus)
+         OpAst -> (#const OpAst)
+         OpSlash -> (#const OpSlash)
+         OpJuxta -> error "Juxta can't appear here"
+         OpPipe -> error "Pipe can't appear here") :: CInt)
+
+  peek _ = error "C->HS interaction not implemented"
+
+foreign import ccall "eval_program" c_evalProgram :: Ptr IRInstr -> CSize -> IO () 
+
+evalProgram :: [IRInstr] -> IO ()
+evalProgram prog = do
+  let len = length prog
+  array <- mallocArray len :: IO (Ptr IRInstr)
+  forM_ (zip [0..] prog) $ \(i, t) -> pokeElemOff array i t
+  c_evalProgram array (fromIntegral len :: CSize)

@@ -1,50 +1,61 @@
-#include <stdio.h>
-#include <stdint.h>
+#include <stddef.h>
 
-struct Literal;
+struct TemplatePart {
+  enum TemplatePartKind { TempExact, TempVar } kind;
 
-enum StrContentKind {
-  Exact = 0,
-  Subst = 1
-};
-
-struct StrContent {
-  uint8_t kind;
   union {
     char *exact;
-    struct Literal *subst;
-  } data;
-};
-
-enum PathContentKind {
-  ExactPath = 0,
-  Glob = 1,
-  GlobRec = 2,
-  StringPath = 3
-};
-
-struct PathContent {
-  uint8_t kind;
-  union {
-    char *exact;
-    struct { struct StrContent *contents; size_t contents_len } str;
-  } data; // TODO
-};
-
-enum LitKind {
-  NumLit = 0,
-  StrLit = 1,
-  VarLit = 2,
-  PathLit = 3
-};
-
-struct Literal {
-  uint8_t kind;
-  union {
-    struct NumLitData { char *whole, *frac; } num;
-    struct StrLitData { struct StrContent *contents; size_t contents_len; } str;
     char *var;
   } data;
 };
 
-void stringifyLiteral(struct Literal const *lit);
+struct PathPart {
+  enum PathPartKind { PathExact, PathGlob, PathRecGlob, PathTmp } kind;
+
+  union {
+    char *exact;
+    struct {
+      struct TemplatePart *parts;
+      size_t parts_length;
+    } tmp;
+  } data;
+};
+
+enum Operator { OpPlus, OpMinus, OpAst, OpSlash };
+
+struct IRInstr {
+  enum IRInstrKind {
+    PushNum,
+    PushTemplate,
+    PushPath,
+    PushFn,
+    LoadVar,
+    StoreVar,
+    DefineVar,
+    CallCommand,
+    CallFunction,
+    ApplyOp,
+    PipeTo
+  } kind;
+
+  union {
+    double num;
+    struct {
+      struct TemplatePart *parts;
+      size_t parts_length;
+    } tmp;
+    struct {
+      struct PathPart *parts;
+      size_t parts_length;
+    } path;
+    char *fn;
+    char *load;
+    char *store;
+    char *define;
+    size_t call_cmd;
+    size_t call_fn;
+    enum Operator apply_op;
+  } data;
+};
+
+void eval_program(struct IRInstr *instrs, size_t instrs_length);

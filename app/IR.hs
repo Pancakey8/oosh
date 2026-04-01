@@ -25,6 +25,7 @@ data IRInstr
   | CallCommand Int
   | CallFunction Int
   | ApplyOp Operator
+  | PipeTo
   deriving (Show)
 
 compileProg :: [Statement] -> [IRInstr]
@@ -37,11 +38,12 @@ compileStmt (SetVarStmt name ex) = compileExpr ex ++ [StoreVar name]
 
 compileExpr :: Expr -> [IRInstr]
 compileExpr (LitExpr lit) = compileLit lit
-compileExpr (BinaryExpr OpPipe l r) = error "TODO: Pipes"
-compileExpr ex@(BinaryExpr OpJuxta l r) =
+compileExpr (BinaryExpr OpPipe l r) =
+  compileExpr l ++ [PipeTo] ++ compileExpr r
+compileExpr ex@(BinaryExpr OpJuxta _ _) =
   case flattenJuxta ex of
-    call@(LitExpr (VarLit name):args) -> concatMap compileExpr args ++ [PushFn name, CallFunction (length args)]
-    _ -> error "Function call to non-function object"
+    (callee:args) -> concatMap compileExpr args ++ compileExpr callee ++  [CallFunction (length args)]
+    _ -> error "Juxta on a single node (?)"
 compileExpr (BinaryExpr op l r) = compileExpr l ++ compileExpr r ++ [ApplyOp op]
 compileExpr (CommandExpr name args) =
   map (PushTemplate . map templatifyContent) args ++ [commandName name, CallCommand (length args)]

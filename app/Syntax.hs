@@ -51,21 +51,14 @@ numberLit = do
   frac <- (char '.' >> many1 digit) <|> pure ""
   pure $ NumLit whole frac
 
-reserved :: [Char]
-reserved = ['\'', '"', '(', ')', '[', ']', '$', '.', ':', ',', '='] ++ map (\(a, _, _) -> head a) operators
-
-identCharStart :: Char -> Bool
-identCharStart c = not (isSpace c || isDigit c || c `elem` reserved)
-
-identChar :: Char -> Bool
-identChar c = identCharStart c || isDigit c
+isIdentChar :: Char -> Bool
+isIdentChar c = isAlphaNum c || c == '_'
 
 varLit :: Parser Literal
 varLit = do
   _ <- char '$'
-  first <- satisfy identCharStart
-  name <- many (satisfy identChar)
-  pure $ VarLit (first : name)
+  name <- many1 (satisfy isIdentChar)
+  pure (VarLit name)
 
 stringLit :: Parser Literal
 stringLit = do
@@ -79,7 +72,7 @@ stringLit = do
 
 pathLit :: Parser Literal
 pathLit = do
-  start <- char ':'
+  _ <- char ':'
   let glob = try (string "**" >> pure RecGlob) <|> (char '*' >> pure Glob)
       exact = ExactPath <$> many1 (satisfy (\c -> not (isSpace c || c == '*' || c == '\'' || c == '"')))
       str = do
@@ -107,7 +100,7 @@ commandExpr = do
   CommandExpr cmdName . filter (not . null) <$> getArgs
   where
     getCmdName :: Parser CommandName
-    getCmdName = pathArg <|> identArg
+    getCmdName = pathArg <|> autoArg
 
     getArgs :: Parser [[StrContent]]
     getArgs = manyTill getArg (try terminator)
@@ -121,11 +114,13 @@ commandExpr = do
     getArg :: Parser [StrContent]
     getArg = varArg <|> exactArg <|> quoteArg
 
-    identArg :: Parser CommandName
-    identArg = do
-      first <- satisfy identCharStart
-      name <- many (satisfy identChar)
-      pure $ Auto (first : name)
+    autoArg :: Parser CommandName
+    autoArg = do
+      first <- satisfy (\c -> isAlpha c || c `elem` permitted)
+      name <- many (satisfy (\c -> isAlphaNum c || c `elem` permitted))
+      pure $ Auto (first:name)
+      where
+        permitted = ['_', '.', '/', '-']
 
     pathArg :: Parser CommandName
     pathArg = do
@@ -203,11 +198,10 @@ ledExpr allowCmd minPrec = do
 
 defVarStmt :: Parser Statement
 defVarStmt = do
-  first <- satisfy identCharStart
-  name <- many (satisfy identChar)
+  name <- many1 (satisfy isIdentChar)
   _ <- symbol "="
   rhs <- ledExpr True 0
-  pure (DefVarStmt (first : name) rhs)
+  pure (DefVarStmt name rhs)
 
 setVarStmt :: Parser Statement
 setVarStmt = do

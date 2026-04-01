@@ -1,42 +1,69 @@
 #include "wrapper.h"
 #include <stdio.h>
-#include <string.h>
 
-void stringifyStrContent(struct StrContent const *content) {
-  switch ((enum StrContentKind)content->kind) {
-  case Exact: {
-    printf("%s", content->data.exact);
+char *stringify_op(enum Operator op) {
+  switch (op) {
+  case OpPlus:
+    return "+";
+  case OpMinus:
+    return "-";
+  case OpAst:
+    return "*";
+  case OpSlash:
+    return "/";
+  }
+}
+
+void print_instruction(struct IRInstr const *instr) {
+  switch (instr->kind) {
+  case PushNum: {
+    printf("PushNum %lf\n", instr->data.num);
   } break;
 
-  case Subst: {
-    printf("$%s", content->data.subst->data.var);
+  case PushTemplate: {
+    printf("PushTemplate TODO\n");
+  } break;
+
+  case PushPath: {
+    printf("PushPath TODO\n");
+  } break;
+
+  case PushFn: {
+    printf("PushFn %s\n", instr->data.fn);
+  } break;
+
+  case LoadVar: {
+    printf("LoadVar %s\n", instr->data.load);
+  } break;
+
+  case StoreVar: {
+    printf("StoreVar %s\n", instr->data.store);
+  } break;
+
+  case DefineVar: {
+    printf("DefineVar %s\n", instr->data.define);
+  } break;
+
+  case CallCommand: {
+    printf("CallCommand %zu\n", instr->data.call_cmd);
+  } break;
+
+  case CallFunction: {
+    printf("CallFunction %zu\n", instr->data.call_fn);
+  } break;
+
+  case ApplyOp: {
+    printf("ApplyOp %s\n", stringify_op(instr->data.apply_op));
+  } break;
+
+  case PipeTo: {
+    printf("PipeTo\n");
   } break;
   }
 }
 
-void stringifyLiteral(struct Literal const *lit) {
-  switch ((enum LitKind)lit->kind) {
-  case NumLit: {
-    if (strlen(lit->data.num.frac) == 0) {
-      printf("%s\n", lit->data.num.whole);
-    } else {
-      printf("%s.%s\n", lit->data.num.whole, lit->data.num.frac);
-    }
-  } break;
-
-  case StrLit: {
-    putchar('"');
-    for (size_t i = 0; i < lit->data.str.contents_len; ++i) {
-      stringifyStrContent(&lit->data.str.contents[i]);
-    }
-    puts("\"\n");
-  } break;
-
-  case VarLit: {
-    printf("$%s\n", lit->data.var);
-  } break;
-
-  case PathLit:
-    break;
+void eval_program(struct IRInstr *instrs, size_t instrs_length) {
+  for (size_t i = 0; i < instrs_length; ++i) {
+    print_instruction(&instrs[i]);
   }
 }
