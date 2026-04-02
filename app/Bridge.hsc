@@ -114,11 +114,15 @@ instance Storable IRInstr where
 
   peek _ = error "C->HS interaction not implemented"
 
-foreign import ccall "eval_program" c_evalProgram :: Ptr IRInstr -> CSize -> IO () 
+type ProgramStatePtr = Ptr ()
+
+foreign import ccall "eval_program" c_evalProgram :: ProgramStatePtr -> Ptr IRInstr -> CSize -> IO () 
+foreign import ccall "init_program" c_initProgram :: IO ProgramStatePtr
 
 evalProgram :: [IRInstr] -> IO ()
 evalProgram prog = do
+  state <- c_initProgram -- TODO: We need to persist this, also leaking this
   let len = length prog
-  array <- mallocArray len :: IO (Ptr IRInstr)
+  array <- mallocArray len :: IO (Ptr IRInstr) -- TODO: We're leaking this
   forM_ (zip [0..] prog) $ \(i, t) -> pokeElemOff array i t
-  c_evalProgram array (fromIntegral len :: CSize)
+  c_evalProgram state array (fromIntegral len :: CSize)

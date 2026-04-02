@@ -80,11 +80,12 @@ executable oosh
 
     c-sources:        csrc/wrapper.c
 
-    cc-options: -g -O0
+    cc-options:       -g -O0
 
     include-dirs:     csrc
 
-    includes:         wrapper.h
+    includes:         wrapper.h,
+                      csrc/stb_ds.h
 
     -- Base language which the package is written in.
     default-language: GHC2024

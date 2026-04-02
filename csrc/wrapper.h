@@ -56,4 +56,9 @@ struct IRInstr {
   } data;
 };
 
-void eval_program(struct IRInstr *instrs, size_t instrs_length);
+struct ProgramState;
+
+struct ProgramState *init_program();
+
+void eval_program(struct ProgramState *state, struct IRInstr *instrs,
+                  size_t instrs_length);

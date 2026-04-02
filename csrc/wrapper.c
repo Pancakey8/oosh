@@ -1,5 +1,11 @@
 #include "wrapper.h"
+#include <stddef.h>
 #include <stdio.h>
+#include <assert.h>
+#include <stdbool.h>
+
+#define STB_DS_IMPLEMENTATION
+#include "stb_ds.h"
 
 char *stringify_op(enum Operator op) {
   switch (op) {
@@ -98,8 +104,150 @@ void print_instruction(struct IRInstr const *instr) {
   }
 }
 
-void eval_program(struct IRInstr *instrs, size_t instrs_length) {
+struct Value {
+  enum ValueKind {
+    ValNum,
+    ValStr
+  } kind;
+
+  union {
+    double num;
+    char *str; // TODO: Store lengths
+  } data;
+};
+
+struct Value stringify(struct Value v) {
+  switch (v.kind) {
+  case ValNum: {
+    int len = snprintf(NULL, 0, "%lf", v.data.num);
+    char *s = malloc(len + 1);
+    snprintf(s, len + 1, "%lf", v.data.num);
+    return (struct Value){.kind = ValStr, .data.str = s};
+  } break;
+  case ValStr:
+    return v;
+  }
+}
+
+void typecast(struct Value *val1, struct Value *val2) {
+  if (val1->kind == val2->kind) return;
+
+  if (val1->kind == ValStr) {
+    *val2 = stringify(*val2); // Handle old val2
+    return;
+  } else if (val2->kind == ValStr) {
+    *val1 = stringify(*val1); // Handle old val1
+    return;
+  }
+}
+
+struct Value value_add(struct Value left, struct Value right) {
+  typecast(&left, &right);
+
+  if (left.kind == ValNum && right.kind == ValNum) {
+    return (struct Value){.kind = ValNum, .data.num = left.data.num + right.data.num};
+  }
+
+  if (left.kind == ValStr && right.kind == ValStr) {
+    size_t left_len = strlen(left.data.str);
+    size_t right_len = strlen(right.data.str);
+    char *cat = calloc(left_len + right_len + 1, sizeof(char));
+    memcpy(cat, left.data.str, left_len);
+    memcpy(&cat[left_len], right.data.str, right_len);
+    return (struct Value){.kind = ValStr, .data.str = cat};
+  }
+}
+
+struct ProgramState {
+  struct Value *stack;
+  struct { char *key; struct Value value; } *locals, *globals;
+};
+
+struct ProgramState *init_program() {
+  struct ProgramState *state = malloc(sizeof(typeof(*state)));
+  return state;
+}
+
+void eval_instr(struct ProgramState *state, struct IRInstr const *instr) {
+  switch (instr->kind) {
+  case PushNum: {
+    struct Value val = (struct Value){.kind = ValNum, .data.num = instr->data.num};
+    arrput(state->stack, val);
+  } break;
+  case DefineVar: {
+    assert(arrlen(state->stack) > 0);
+
+    if (shgetp_null(state->locals, instr->data.define)) {
+      assert(false && "TODO: Error handling: Redefining existing variable");
+      return;
+    }
+
+    struct Value val = arrpop(state->stack);
+    shput(state->locals, instr->data.define, val);
+  } break;
+  case LoadVar: {
+    typeof(*state->locals) *value;
+    if ((value = shgetp_null(state->locals, instr->data.load)) == NULL) {
+      if ((value = shgetp_null(state->globals, instr->data.load)) == NULL) {
+        assert(false && "TODO: Error handling: Accessing undefined variable");
+        return;
+      }
+    }
+    arrput(state->stack, value->value);
+  } break;
+  case StoreVar: {
+    assert(arrlen(state->stack) > 0);
+
+    typeof(*state->locals) *value;
+    if ((value = shgetp_null(state->locals, instr->data.load)) == NULL) {
+      if ((value = shgetp_null(state->globals, instr->data.load)) == NULL) {
+        assert(false && "TODO: Error handling: Accessing undefined variable");
+        return;
+      }
+    }
+
+    struct Value val = arrpop(state->stack);
+    value->value = val;
+    // TODO: Free old value
+  } break;
+  case ApplyOp: {
+    assert(arrlen(state->stack) >= 2);
+    // TODO: Free left/right
+    struct Value right = arrpop(state->stack);
+    struct Value left = arrpop(state->stack);
+
+    switch (instr->data.apply_op) {
+    case OpPlus: {
+      arrput(state->stack, value_add(left, right));
+    } break;
+    case OpMinus:
+    case OpAst:
+    case OpSlash:
+      assert(false && "TODO: Operator");
+      break;
+    }
+  } break;
+  case PushTemplate:
+  case PushPath:
+  case CallCommand:
+  case CallFunction:
+  case PipeTo:
+    assert(false && "TODO: Instruction");
+    break;
+  }
+}
+
+void eval_program(struct ProgramState *state, struct IRInstr *instrs, size_t instrs_length) {
   for (size_t i = 0; i < instrs_length; ++i) {
     print_instruction(&instrs[i]);
+  }
+
+  for (size_t i = 0; i < instrs_length; ++i) {
+    eval_instr(state, &instrs[i]);
+  }
+
+  printf("Final stack:\n");
+  for (size_t i = 0; i < arrlen(state->stack); ++i) {
+    printf("- %s\n", stringify(state->stack[i]).data.str);
   }
 }
