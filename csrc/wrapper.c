@@ -133,10 +133,10 @@ void typecast(struct Value *val1, struct Value *val2) {
   if (val1->kind == val2->kind) return;
 
   if (val1->kind == ValStr) {
-    *val2 = stringify(*val2); // Handle old val2
+    *val2 = stringify(*val2); // TODO: Handle old val2
     return;
   } else if (val2->kind == ValStr) {
-    *val1 = stringify(*val1); // Handle old val1
+    *val1 = stringify(*val1); // TODO: Handle old val1
     return;
   }
 }
@@ -156,6 +156,8 @@ struct Value value_add(struct Value left, struct Value right) {
     memcpy(&cat[left_len], right.data.str, right_len);
     return (struct Value){.kind = ValStr, .data.str = cat};
   }
+
+  assert(false && "Unreachable due to typecast matching types");
 }
 
 struct ProgramState {
@@ -166,6 +168,38 @@ struct ProgramState {
 struct ProgramState *init_program() {
   struct ProgramState *state = malloc(sizeof(typeof(*state)));
   return state;
+}
+
+struct Value eval_template(struct ProgramState *state, struct TemplatePart *parts, size_t parts_length) {
+  char *total = malloc(1);
+  size_t total_length = 0;
+  for (size_t i = 0; i < parts_length; ++i) {
+    switch (parts[i].kind) {
+    case TempExact: {
+      size_t start = total_length;
+      size_t len = strlen(parts[i].data.exact);
+      total_length += len;
+      total = realloc(total, total_length + 1);
+      memcpy(&total[start], parts[i].data.exact, len);
+    } break;
+    case TempVar: {
+      typeof(*state->locals) *value;
+      if ((value = shgetp_null(state->locals, parts[i].data.var)) == NULL) {
+        if ((value = shgetp_null(state->globals, parts[i].data.var)) == NULL) {
+          assert(false && "TODO: Error handling: Accessing undefined variable");
+        }
+      }
+      struct Value v = stringify(value->value);
+      size_t start = total_length;
+      size_t len = strlen(v.data.str);
+      total_length += len;
+      total = realloc(total, total_length + 1);
+      memcpy(&total[start], v.data.str, len);
+    } break;
+    }
+  }
+  total[total_length] = '\0';
+  return (struct Value){.kind = ValStr, .data.str = total};
 }
 
 void eval_instr(struct ProgramState *state, struct IRInstr const *instr) {
@@ -227,7 +261,10 @@ void eval_instr(struct ProgramState *state, struct IRInstr const *instr) {
       break;
     }
   } break;
-  case PushTemplate:
+  case PushTemplate: {
+    struct Value str = eval_template(state, instr->data.tmp.parts, instr->data.tmp.parts_length);
+    arrput(state->stack, str);
+  } break;
   case PushPath:
   case CallCommand:
   case CallFunction:
@@ -250,4 +287,7 @@ void eval_program(struct ProgramState *state, struct IRInstr *instrs, size_t ins
   for (size_t i = 0; i < arrlen(state->stack); ++i) {
     printf("- %s\n", stringify(state->stack[i]).data.str);
   }
+
+  arrfree(state->stack);
+  state->stack = NULL;
 }

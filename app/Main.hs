@@ -8,15 +8,17 @@ import Text.Parsec
 import IR
 
 main :: IO ()
-main = runInputT defaultSettings loop
+main = do
+  state <- initProgram
+  runInputT defaultSettings (loop state)
   where
-    loop :: InputT IO ()
-    loop = do
+    loop :: ProgramStatePtr -> InputT IO ()
+    loop state = do
       minput <- getInputLine "$ "
       case minput of
         Nothing -> return ()
         Just input -> do
           case runParser program () "shell" input of
-            Right prog -> liftIO $ evalProgram $ compileProg prog
+            Right prog -> liftIO $ evalProgram state $ compileProg prog
             Left err -> liftIO $ print err
-          loop
+          loop state

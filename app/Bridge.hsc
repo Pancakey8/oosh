@@ -117,11 +117,10 @@ instance Storable IRInstr where
 type ProgramStatePtr = Ptr ()
 
 foreign import ccall "eval_program" c_evalProgram :: ProgramStatePtr -> Ptr IRInstr -> CSize -> IO () 
-foreign import ccall "init_program" c_initProgram :: IO ProgramStatePtr
+foreign import ccall "init_program" initProgram :: IO ProgramStatePtr
 
-evalProgram :: [IRInstr] -> IO ()
-evalProgram prog = do
-  state <- c_initProgram -- TODO: We need to persist this, also leaking this
+evalProgram :: ProgramStatePtr -> [IRInstr] -> IO ()
+evalProgram state prog = do
   let len = length prog
   array <- mallocArray len :: IO (Ptr IRInstr) -- TODO: We're leaking this
   forM_ (zip [0..] prog) $ \(i, t) -> pokeElemOff array i t
