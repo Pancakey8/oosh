@@ -1,8 +1,8 @@
 #include "wrapper.h"
-#include <stddef.h>
-#include <stdio.h>
 #include <assert.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
 
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
@@ -32,8 +32,7 @@ void stringify_tmp(struct TemplatePart const *part, char *out,
   }
 }
 
-void stringify_path(struct PathPart const *part, char *out,
-                   size_t out_size) {
+void stringify_path(struct PathPart const *part, char *out, size_t out_size) {
   switch (part->kind) {
   case PathExact: {
     snprintf(out, out_size, "Exact '%s'", part->data.exact);
@@ -74,6 +73,14 @@ void print_instruction(struct IRInstr const *instr) {
     }
   } break;
 
+  case PushFn: {
+    printf("PushFn {\n");
+    for (size_t i = 0; i < instr->data.fn.instrs_length; ++i) {
+      print_instruction(&instr->data.fn.instrs[i]);
+    }
+    printf("}\n");
+  } break;
+
   case LoadVar: {
     printf("LoadVar %s\n", instr->data.load);
   } break;
@@ -105,14 +112,15 @@ void print_instruction(struct IRInstr const *instr) {
 }
 
 struct Value {
-  enum ValueKind {
-    ValNum,
-    ValStr
-  } kind;
+  enum ValueKind { ValNum, ValStr, ValFn } kind;
 
   union {
     double num;
-    char *str; // TODO: Store lengths
+    char *str; // TODO: Store length
+    struct {
+      struct IRInstr *instrs;
+      size_t instrs_length;
+    } fn;
   } data;
 };
 
@@ -126,11 +134,14 @@ struct Value stringify(struct Value v) {
   } break;
   case ValStr:
     return v;
+  case ValFn:
+    return (struct Value){.kind = ValFn, .data.str = strdup("<function>")};
   }
 }
 
 void typecast(struct Value *val1, struct Value *val2) {
-  if (val1->kind == val2->kind) return;
+  if (val1->kind == val2->kind)
+    return;
 
   if (val1->kind == ValStr) {
     *val2 = stringify(*val2); // TODO: Handle old val2
@@ -139,13 +150,18 @@ void typecast(struct Value *val1, struct Value *val2) {
     *val1 = stringify(*val1); // TODO: Handle old val1
     return;
   }
+
+  if (val1->kind == ValFn || val2->kind == ValFn) {
+    assert(false && "TODO: Error handling: cannot cast value to function");
+  }
 }
 
 struct Value value_add(struct Value left, struct Value right) {
   typecast(&left, &right);
 
   if (left.kind == ValNum && right.kind == ValNum) {
-    return (struct Value){.kind = ValNum, .data.num = left.data.num + right.data.num};
+    return (struct Value){.kind = ValNum,
+                          .data.num = left.data.num + right.data.num};
   }
 
   if (left.kind == ValStr && right.kind == ValStr) {
@@ -157,20 +173,28 @@ struct Value value_add(struct Value left, struct Value right) {
     return (struct Value){.kind = ValStr, .data.str = cat};
   }
 
+  if (left.kind == ValFn && right.kind == ValFn) {
+    assert(false && "TODO: Error handling: cannot sum functions");
+  }
+
   assert(false && "Unreachable due to typecast matching types");
 }
 
 struct ProgramState {
   struct Value *stack;
-  struct { char *key; struct Value value; } *locals, *globals;
+  struct {
+    char *key;
+    struct Value value;
+  } *locals, *globals;
 };
 
 struct ProgramState *init_program() {
-  struct ProgramState *state = malloc(sizeof(typeof(*state)));
+  struct ProgramState *state = calloc(1, sizeof(typeof(*state)));
   return state;
 }
 
-struct Value eval_template(struct ProgramState *state, struct TemplatePart *parts, size_t parts_length) {
+struct Value eval_template(struct ProgramState *state,
+                           struct TemplatePart *parts, size_t parts_length) {
   char *total = malloc(1);
   size_t total_length = 0;
   for (size_t i = 0; i < parts_length; ++i) {
@@ -205,7 +229,8 @@ struct Value eval_template(struct ProgramState *state, struct TemplatePart *part
 void eval_instr(struct ProgramState *state, struct IRInstr const *instr) {
   switch (instr->kind) {
   case PushNum: {
-    struct Value val = (struct Value){.kind = ValNum, .data.num = instr->data.num};
+    struct Value val =
+        (struct Value){.kind = ValNum, .data.num = instr->data.num};
     arrput(state->stack, val);
   } break;
   case DefineVar: {
@@ -262,22 +287,62 @@ void eval_instr(struct ProgramState *state, struct IRInstr const *instr) {
     }
   } break;
   case PushTemplate: {
-    struct Value str = eval_template(state, instr->data.tmp.parts, instr->data.tmp.parts_length);
+    struct Value str = eval_template(state, instr->data.tmp.parts,
+                                     instr->data.tmp.parts_length);
     arrput(state->stack, str);
+  } break;
+  case PushFn: {
+    struct Value fn =
+        (struct Value){.kind = ValFn,
+                       .data.fn.instrs = instr->data.fn.instrs,
+                       .data.fn.instrs_length = instr->data.fn.instrs_length};
+    arrput(state->stack, fn);
+  } break;
+  case CallFunction: {
+    assert(arrlen(state->stack) >= 1 + instr->data.call_fn);
+    struct Value callee = arrpop(state->stack);
+    if (callee.kind != ValFn) {
+      assert(false && "TODO: Error handling: cannot call non-function");
+    }
+
+    struct ProgramState *call_scope = init_program();
+    for (size_t i = 0; i < shlen(state->globals); ++i) {
+      shput(call_scope->globals, state->globals[i].key, state->globals[i].value);
+    }
+    for (size_t i = 0; i < shlen(state->locals); ++i) {
+      shput(call_scope->globals, state->locals[i].key, state->locals[i].value);
+    }
+    for (size_t i = instr->data.call_fn - 1; ; --i) {
+      int len = snprintf(NULL, 0, "%zu", i);
+      char *s = malloc(sizeof(len) + 1);
+      snprintf(s, len + 1, "%zu", i);
+      shput(call_scope->locals, s, arrpop(state->stack));
+
+      if (i == 0) break;
+    }
+
+    eval_program(call_scope, callee.data.fn.instrs, callee.data.fn.instrs_length);
+    if (arrlen(call_scope->stack) > 0) {
+      arrput(state->stack, arrpop(call_scope->stack));
+    }
+    // TODO: Free call_scope
   } break;
   case PushPath:
   case CallCommand:
-  case CallFunction:
   case PipeTo:
     assert(false && "TODO: Instruction");
     break;
   }
 }
 
-void eval_program(struct ProgramState *state, struct IRInstr *instrs, size_t instrs_length) {
-  for (size_t i = 0; i < instrs_length; ++i) {
-    print_instruction(&instrs[i]);
-  }
+void eval_program(struct ProgramState *state, struct IRInstr *instrs,
+                  size_t instrs_length) {
+  arrfree(state->stack);
+  state->stack = NULL;
+
+  /* for (size_t i = 0; i < instrs_length; ++i) { */
+  /*   print_instruction(&instrs[i]); */
+  /* } */
 
   for (size_t i = 0; i < instrs_length; ++i) {
     eval_instr(state, &instrs[i]);
@@ -287,7 +352,4 @@ void eval_program(struct ProgramState *state, struct IRInstr *instrs, size_t ins
   for (size_t i = 0; i < arrlen(state->stack); ++i) {
     printf("- %s\n", stringify(state->stack[i]).data.str);
   }
-
-  arrfree(state->stack);
-  state->stack = NULL;
 }

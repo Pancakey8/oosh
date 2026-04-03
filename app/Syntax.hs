@@ -23,6 +23,7 @@ data Literal
   | StrLit [StrContent]
   | VarLit String
   | PathLit [PathContent]
+  | FunctionLit [Statement]
   deriving (Show)
 
 data Operator = OpPipe | OpPlus | OpMinus | OpAst | OpSlash | OpJuxta
@@ -81,8 +82,13 @@ pathLit = do
       path = many1 (glob <|> exact <|> str)
   PathLit <$> path
 
+functionLit :: Parser Literal
+functionLit = do
+  _ <- char '{'
+  FunctionLit <$> manyTill statement (char '}')
+
 literal :: Parser Literal
-literal = stringLit <|> numberLit <|> varLit <|> pathLit
+literal = stringLit <|> numberLit <|> varLit <|> pathLit <|> functionLit
 
 hSpaces :: Parser ()
 hSpaces = skipMany (oneOf [' ', '\t'])

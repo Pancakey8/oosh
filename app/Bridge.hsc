@@ -75,6 +75,14 @@ instance Storable IRInstr where
     (#poke struct IRInstr, data.path.parts) ptr array
     (#poke struct IRInstr, data.path.parts_length) ptr len
 
+  poke ptr (PushFn ts) = do
+    (#poke struct IRInstr, kind) ptr ((#const PushFn) :: CInt)
+    let len = length ts
+    array <- mallocArray len :: IO (Ptr IRInstr)
+    forM_ (zip [0..] ts) $ \(i, t) -> pokeElemOff array i t
+    (#poke struct IRInstr, data.fn.instrs) ptr array
+    (#poke struct IRInstr, data.fn.instrs_length) ptr len
+
   poke ptr (LoadVar s) = do
     (#poke struct IRInstr, kind) ptr ((#const LoadVar) :: CInt)
     cstr <- newCString s

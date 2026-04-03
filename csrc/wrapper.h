@@ -28,6 +28,7 @@ struct IRInstr {
     PushNum,
     PushTemplate,
     PushPath,
+    PushFn,
     LoadVar,
     StoreVar,
     DefineVar,
@@ -47,6 +48,10 @@ struct IRInstr {
       struct PathPart *parts;
       size_t parts_length;
     } path;
+    struct {
+      struct IRInstr *instrs;
+      size_t instrs_length;
+    } fn;
     char *load;
     char *store;
     char *define;
