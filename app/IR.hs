@@ -1,6 +1,7 @@
 module IR where
 
 import Syntax
+import Data.List
 
 data TemplatePart
   = TempExact String
@@ -26,10 +27,11 @@ data IRInstr
   | CallFunction Int
   | ApplyOp Operator
   | PipeTo
+  | Drop
   deriving (Show)
 
 compileProg :: [Statement] -> [IRInstr]
-compileProg = concatMap compileStmt
+compileProg prog = intercalate [Drop] $ map compileStmt prog
 
 compileStmt :: Statement -> [IRInstr]
 compileStmt (ExprStmt ex) = compileExpr ex
@@ -38,6 +40,7 @@ compileStmt (SetVarStmt name ex) = compileExpr ex ++ [StoreVar name]
 
 compileExpr :: Expr -> [IRInstr]
 compileExpr (LitExpr lit) = compileLit lit
+compileExpr (GroupExpr inside) = compileExpr inside
 compileExpr (BinaryExpr OpPipe l r) =
   compileExpr l ++ [PipeTo] ++ compileExpr r
 compileExpr ex@(BinaryExpr OpJuxta _ _) =

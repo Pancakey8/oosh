@@ -12,8 +12,8 @@ data StrContent
   deriving (Show)
 
 data PathContent
-  = ExactPath String 
-  | Glob 
+  = ExactPath String
+  | Glob
   | RecGlob
   | StringPath [StrContent]
   deriving (Show)
@@ -37,6 +37,7 @@ data CommandName
 data Expr
   = LitExpr Literal
   | BinaryExpr Operator Expr Expr
+  | GroupExpr Expr
   | CommandExpr CommandName [[StrContent]]
   deriving (Show)
 
@@ -84,8 +85,11 @@ pathLit = do
 
 functionLit :: Parser Literal
 functionLit = do
-  _ <- char '{'
-  FunctionLit <$> manyTill statement (char '}')
+  _ <- symbol "{"
+  _ <- statementSep
+  stmts <- statement `sepEndBy` statementSep
+  _ <- symbol "}"
+  pure $ FunctionLit stmts
 
 literal :: Parser Literal
 literal = stringLit <|> numberLit <|> varLit <|> pathLit <|> functionLit
@@ -112,10 +116,10 @@ commandExpr = do
     getArgs = manyTill getArg (try terminator)
 
     terminator :: Parser String
-    terminator = lookAhead (symbol "|" <|> string "\n" <|> (eof >> pure "") <|> string ")")
+    terminator = lookAhead (symbol "|" <|> string "\n" <|> (eof >> pure "") <|> string ")" <|> string ";")
 
     isWordEnd :: Char -> Bool
-    isWordEnd c = isSpace c || c `elem` ['\n', '|', '"', '\'', ')']
+    isWordEnd c = isSpace c || c `elem` ['\n', '|', '"', '\'', ')', ';']
 
     getArg :: Parser [StrContent]
     getArg = varArg <|> exactArg <|> quoteArg
@@ -158,7 +162,7 @@ nudExpr allowCmd =
       then commandExpr
       else empty)
     <|> (LitExpr <$> literal)
-    <|> (symbol "(" *> ledExpr True 0 <* symbol ")")
+    <|> (GroupExpr <$> (symbol "(" *> ledExpr True 0 <* symbol ")"))
 
 operators :: [(String, Operator, Int)]
 operators = [("|", OpPipe, 10), ("+", OpPlus, 20), ("-", OpMinus, 20), ("*", OpAst, 30), ("/", OpSlash, 30)]
@@ -216,12 +220,15 @@ setVarStmt = do
   rhs <- ledExpr True 0
   pure (SetVarStmt name rhs)
 
+statementSep :: Parser ()
+statementSep = skipMany (oneOf " \t\n\r;")
+
 statement :: Parser Statement
 statement = try setVarStmt <|> try defVarStmt <|> (ExprStmt <$> ledExpr True 0)
 
 program :: Parser [Statement]
 program = do
-  _ <- spaces
-  prog <- many (statement <* spaces)
+  statementSep
+  prog <- statement `sepEndBy` statementSep
   _ <- eof
   pure prog

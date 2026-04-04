@@ -3,189 +3,306 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
 
-char *stringify_op(enum Operator op) {
-  switch (op) {
-  case OpPlus:
-    return "+";
-  case OpMinus:
-    return "-";
-  case OpAst:
-    return "*";
-  case OpSlash:
-    return "/";
-  }
-}
+struct TemplatePart tmp_copy(struct TemplatePart part) {
+  struct TemplatePart copy = part;
 
-void stringify_tmp(struct TemplatePart const *part, char *out,
-                   size_t out_size) {
-  switch (part->kind) {
+  switch (part.kind) {
   case TempExact: {
-    snprintf(out, out_size, "Exact '%s'", part->data.exact);
+    copy.data.exact = strdup(part.data.exact);
   } break;
   case TempVar: {
-    snprintf(out, out_size, "Var %s", part->data.var);
+    copy.data.var = strdup(part.data.var);
   } break;
+  }
+
+  return copy;
+}
+
+void tmp_free(struct TemplatePart part) {
+  switch (part.kind) {
+  case TempExact:
+    free(part.data.exact);
+    break;
+  case TempVar:
+    free(part.data.var);
+    break;
   }
 }
 
-void stringify_path(struct PathPart const *part, char *out, size_t out_size) {
-  switch (part->kind) {
+struct PathPart path_copy(struct PathPart part) {
+  struct PathPart copy = part;
+
+  switch (part.kind) {
   case PathExact: {
-    snprintf(out, out_size, "Exact '%s'", part->data.exact);
-  } break;
-  case PathGlob: {
-    snprintf(out, out_size, "Glob");
-  } break;
-  case PathRecGlob: {
-    snprintf(out, out_size, "RecGlob");
+    copy.data.exact = strdup(part.data.exact);
   } break;
   case PathTmp: {
-    snprintf(out, out_size, "Template [%zu]", part->data.tmp.parts_length);
+    copy.data.tmp.parts =
+        calloc(copy.data.tmp.parts_length, sizeof(struct TemplatePart));
+    for (size_t i = 0; i < copy.data.tmp.parts_length; ++i)
+      copy.data.tmp.parts[i] = tmp_copy(part.data.tmp.parts[i]);
   } break;
+
+  case PathGlob:
+  case PathRecGlob:
+    break;
+  }
+
+  return copy;
+}
+
+void path_free(struct PathPart part) {
+  switch (part.kind) {
+
+  case PathExact:
+    free(part.data.exact);
+    break;
+  case PathTmp: {
+    for (size_t i = 0; i < part.data.tmp.parts_length; ++i)
+      tmp_free(part.data.tmp.parts[i]);
+    free(part.data.tmp.parts);
+  } break;
+  case PathGlob:
+  case PathRecGlob:
+    break;
   }
 }
 
-void print_instruction(struct IRInstr const *instr) {
-  switch (instr->kind) {
-  case PushNum: {
-    printf("PushNum %lf\n", instr->data.num);
-  } break;
+struct IRInstr instr_copy(struct IRInstr instr) {
+  struct IRInstr copy = instr;
 
+  switch (instr.kind) {
   case PushTemplate: {
-    printf("PushTemplate\n");
-    char out[1024];
-    for (size_t i = 0; i < instr->data.tmp.parts_length; ++i) {
-      stringify_tmp(&instr->data.tmp.parts[i], out, 1024);
-      printf("- %s\n", out);
-    }
+    copy.data.tmp.parts =
+        calloc(copy.data.tmp.parts_length, sizeof(struct TemplatePart));
+    for (size_t i = 0; i < copy.data.tmp.parts_length; ++i)
+      copy.data.tmp.parts[i] = tmp_copy(instr.data.tmp.parts[i]);
   } break;
-
   case PushPath: {
-    printf("PushPath\n");
-    char out[1024];
-    for (size_t i = 0; i < instr->data.path.parts_length; ++i) {
-      stringify_path(&instr->data.path.parts[i], out, 1024);
-      printf("- %s\n", out);
-    }
+    copy.data.path.parts =
+        calloc(copy.data.path.parts_length, sizeof(struct PathPart));
+    for (size_t i = 0; i < copy.data.tmp.parts_length; ++i)
+      copy.data.path.parts[i] = path_copy(instr.data.path.parts[i]);
   } break;
-
   case PushFn: {
-    printf("PushFn {\n");
-    for (size_t i = 0; i < instr->data.fn.instrs_length; ++i) {
-      print_instruction(&instr->data.fn.instrs[i]);
-    }
-    printf("}\n");
+    copy.data.fn.instrs =
+        calloc(copy.data.fn.instrs_length, sizeof(struct IRInstr));
+    for (size_t i = 0; i < copy.data.fn.instrs_length; ++i)
+      copy.data.fn.instrs[i] = instr_copy(instr.data.fn.instrs[i]);
   } break;
-
   case LoadVar: {
-    printf("LoadVar %s\n", instr->data.load);
+    copy.data.load = strdup(instr.data.load);
   } break;
-
   case StoreVar: {
-    printf("StoreVar %s\n", instr->data.store);
+    copy.data.store = strdup(instr.data.store);
   } break;
-
   case DefineVar: {
-    printf("DefineVar %s\n", instr->data.define);
+    copy.data.define = strdup(instr.data.define);
   } break;
 
-  case CallCommand: {
-    printf("CallCommand %zu\n", instr->data.call_cmd);
-  } break;
+  case PushNum:
+  case CallCommand:
+  case CallFunction:
+  case ApplyOp:
+  case PipeTo:
+  case Drop:
+    break;
+  }
 
-  case CallFunction: {
-    printf("CallFunction %zu\n", instr->data.call_fn);
-  } break;
+  return copy;
+}
 
-  case ApplyOp: {
-    printf("ApplyOp %s\n", stringify_op(instr->data.apply_op));
+void instr_free(struct IRInstr instr) {
+  switch (instr.kind) {
+  case PushTemplate: {
+    for (size_t i = 0; i < instr.data.tmp.parts_length; ++i)
+      tmp_free(instr.data.tmp.parts[i]);
+    free(instr.data.tmp.parts);
   } break;
+  case PushPath: {
+    for (size_t i = 0; i < instr.data.path.parts_length; ++i)
+      path_free(instr.data.path.parts[i]);
+    free(instr.data.path.parts);
+  } break;
+  case PushFn: {
+    for (size_t i = 0; i < instr.data.fn.instrs_length; ++i)
+      instr_free(instr.data.fn.instrs[i]);
+    free(instr.data.fn.instrs);
+  } break;
+  case LoadVar:
+    free(instr.data.load);
+    break;
+  case StoreVar:
+    free(instr.data.store);
+    break;
+  case DefineVar:
+    free(instr.data.define);
+    break;
 
-  case PipeTo: {
-    printf("PipeTo\n");
-  } break;
+  case PushNum:
+  case CallCommand:
+  case CallFunction:
+  case ApplyOp:
+  case PipeTo:
+  case Drop:
+    break;
   }
 }
 
 struct Value {
-  enum ValueKind { ValNum, ValStr, ValFn } kind;
+  enum ValueKind { ValNum, ValStr, ValFunc, ValVoid } kind;
 
   union {
     double num;
-    char *str; // TODO: Store length
-    struct {
-      struct IRInstr *instrs;
-      size_t instrs_length;
-    } fn;
+    char *stb(str);
+    struct IRInstr *stb(func);
   } data;
+
+  size_t *rc;
 };
 
-struct Value stringify(struct Value v) {
-  switch (v.kind) {
-  case ValNum: {
-    int len = snprintf(NULL, 0, "%lf", v.data.num);
-    char *s = malloc(len + 1);
-    snprintf(s, len + 1, "%lf", v.data.num);
-    return (struct Value){.kind = ValStr, .data.str = s};
+struct Value value_num(double n) {
+  return (struct Value){.kind = ValNum, .data.num = n, .rc = NULL};
+}
+
+struct Value value_str(char const *str) {
+  struct Value val = (struct Value){
+      .kind = ValStr, .data.str = NULL, .rc = malloc(sizeof(size_t))};
+  *val.rc = 1;
+  size_t len = strlen(str);
+  arrsetlen(val.data.str, len + 1);
+  memcpy(val.data.str, str, len + 1);
+  return val;
+}
+
+struct Value value_func(struct IRInstr const *instrs, size_t instrs_length) {
+  struct Value val = (struct Value){
+      .kind = ValFunc, .data.func = NULL, .rc = malloc(sizeof(size_t))};
+  *val.rc = 1;
+  arrsetlen(val.data.func, instrs_length);
+  for (size_t i = 0; i < instrs_length; ++i) {
+    val.data.func[i] = instr_copy(instrs[i]);
+  }
+  return val;
+}
+
+struct Value value_void(void) {
+  return (struct Value){.kind = ValVoid, .data = {0}, .rc = NULL};
+}
+
+struct Value value_shallowcpy(struct Value val) {
+  if (val.kind == ValNum || val.kind == ValVoid)
+    return val;
+  (*val.rc)++;
+  return val;
+}
+
+struct Value value_own(struct Value val) {
+  if (!val.rc || *val.rc == 1)
+    return val;
+  *val.rc -= 1;
+
+  struct Value owned =
+      (struct Value){.kind = val.kind, .rc = malloc(sizeof(size_t))};
+  *owned.rc = 1;
+
+  switch (val.kind) {
+  case ValStr: {
+    owned.data.str = NULL;
+    arrsetlen(owned.data.str, arrlenu(val.data.str));
+    memcpy(owned.data.str, val.data.str, arrlenu(val.data.str));
   } break;
-  case ValStr:
-    return v;
-  case ValFn:
-    return (struct Value){.kind = ValFn, .data.str = strdup("<function>")};
+
+  case ValFunc: {
+    owned.data.func = NULL;
+    arrsetlen(owned.data.func, arrlenu(val.data.func));
+    for (size_t i = 0; i < arrlenu(val.data.func); ++i) {
+      owned.data.func[i] = instr_copy(val.data.func[i]);
+    }
+  } break;
+
+  case ValNum:
+  case ValVoid:
+    assert(false && "Unreachable since rc == NULL");
+    break;
+  }
+
+  return owned;
+}
+
+void value_drop(struct Value val) {
+  if (!val.rc)
+    return;
+  if (*val.rc > 1) {
+    (*val.rc)--;
+    return;
+  }
+
+  free(val.rc);
+  switch (val.kind) {
+  case ValStr: {
+    arrfree(val.data.str);
+  } break;
+
+  case ValFunc: {
+    for (size_t i = 0; i < arrlenu(val.data.func); ++i)
+      instr_free(val.data.func[i]);
+    arrfree(val.data.func);
+  } break;
+
+  case ValNum:
+  case ValVoid:
+    assert(false && "Unreachable since rc == NULL");
+    break;
   }
 }
 
-void typecast(struct Value *val1, struct Value *val2) {
-  if (val1->kind == val2->kind)
-    return;
-
-  if (val1->kind == ValStr) {
-    *val2 = stringify(*val2); // TODO: Handle old val2
-    return;
-  } else if (val2->kind == ValStr) {
-    *val1 = stringify(*val1); // TODO: Handle old val1
-    return;
+char *stb(value_as_string)(struct Value val) {
+  switch (val.kind) {
+  case ValNum: {
+    int n = snprintf(NULL, 0, "%lf", val.data.num);
+    char *str = NULL;
+    arrsetlen(str, n + 1);
+    snprintf(str, n + 1, "%lf", val.data.num);
+    return str;
+  } break;
+  case ValStr: {
+    char *str = NULL;
+    arrsetlen(str, arrlenu(val.data.str));
+    memcpy(str, val.data.str, arrlenu(val.data.str));
+    return str;
+  } break;
+  case ValFunc: {
+    char *fn = "<function>";
+    char *str = NULL;
+    arrsetlen(str, strlen(fn) + 1);
+    strcpy(str, fn);
+    return str;
+  } break;
+  case ValVoid: {
+    char *vd = "<void>";
+    char *str = NULL;
+    arrsetlen(str, strlen(vd) + 1);
+    strcpy(str, vd);
+    return str;
+  } break;
   }
-
-  if (val1->kind == ValFn || val2->kind == ValFn) {
-    assert(false && "TODO: Error handling: cannot cast value to function");
-  }
-}
-
-struct Value value_add(struct Value left, struct Value right) {
-  typecast(&left, &right);
-
-  if (left.kind == ValNum && right.kind == ValNum) {
-    return (struct Value){.kind = ValNum,
-                          .data.num = left.data.num + right.data.num};
-  }
-
-  if (left.kind == ValStr && right.kind == ValStr) {
-    size_t left_len = strlen(left.data.str);
-    size_t right_len = strlen(right.data.str);
-    char *cat = calloc(left_len + right_len + 1, sizeof(char));
-    memcpy(cat, left.data.str, left_len);
-    memcpy(&cat[left_len], right.data.str, right_len);
-    return (struct Value){.kind = ValStr, .data.str = cat};
-  }
-
-  if (left.kind == ValFn && right.kind == ValFn) {
-    assert(false && "TODO: Error handling: cannot sum functions");
-  }
-
-  assert(false && "Unreachable due to typecast matching types");
 }
 
 struct ProgramState {
-  struct Value *stack;
   struct {
     char *key;
     struct Value value;
-  } *locals, *globals;
+  } *stb(local), *stb(global);
+
+  // Evaluation stack
+  struct Value *stb(stack);
 };
 
 struct ProgramState *init_program() {
@@ -193,163 +310,186 @@ struct ProgramState *init_program() {
   return state;
 }
 
-struct Value eval_template(struct ProgramState *state,
-                           struct TemplatePart *parts, size_t parts_length) {
-  char *total = malloc(1);
-  size_t total_length = 0;
+void program_free(struct ProgramState *state) {
+  if (!state) return;
+  
+  if (state->stack) {
+    for (size_t i = 0; i < arrlenu(state->stack); ++i)
+      value_drop(state->stack[i]);
+    arrfree(state->stack);
+  }
+
+  if (state->local) {
+    for (size_t i = 0; i < shlenu(state->local); ++i)
+      value_drop(state->local[i].value);
+    shfree(state->local);
+  }
+
+  if (state->global) {
+    for (size_t i = 0; i < shlenu(state->global); ++i)
+      value_drop(state->global[i].value);
+    shfree(state->global);
+  }
+
+  free(state);
+}
+
+char *stb(eval_tmps)(struct ProgramState *state, struct TemplatePart *parts,
+                     size_t parts_length) {
+  char *res = NULL;
+  arrput(res, '\0');
   for (size_t i = 0; i < parts_length; ++i) {
     switch (parts[i].kind) {
     case TempExact: {
-      size_t start = total_length;
-      size_t len = strlen(parts[i].data.exact);
-      total_length += len;
-      total = realloc(total, total_length + 1);
-      memcpy(&total[start], parts[i].data.exact, len);
+      size_t len = arrlenu(res) - 1;
+      size_t part_len = strlen(parts[i].data.exact);
+      arrsetlen(res, len + part_len + 1);
+      memcpy(&res[len], parts[i].data.exact, part_len + 1);
     } break;
     case TempVar: {
-      typeof(*state->locals) *value;
-      if ((value = shgetp_null(state->locals, parts[i].data.var)) == NULL) {
-        if ((value = shgetp_null(state->globals, parts[i].data.var)) == NULL) {
-          assert(false && "TODO: Error handling: Accessing undefined variable");
+      typeof(*state->local) *kv;
+      if (!(kv = shgetp_null(state->local, parts[i].data.var))) {
+        if (!(kv = shgetp_null(state->global, parts[i].data.var))) {
+          assert(false && "TODO: Error handling, variable not defined");
         }
       }
-      struct Value v = stringify(value->value);
-      size_t start = total_length;
-      size_t len = strlen(v.data.str);
-      total_length += len;
-      total = realloc(total, total_length + 1);
-      memcpy(&total[start], v.data.str, len);
+      char *s = value_as_string(kv->value);
+      size_t len = arrlenu(res) - 1;
+      size_t s_len = arrlenu(s) - 1;
+      arrsetlen(res, len + s_len + 1);
+      memcpy(&res[len], s, s_len + 1);
+      arrfree(s);
     } break;
     }
   }
-  total[total_length] = '\0';
-  return (struct Value){.kind = ValStr, .data.str = total};
+  return res;
 }
 
-void eval_instr(struct ProgramState *state, struct IRInstr const *instr) {
-  switch (instr->kind) {
+void eval_instr(struct ProgramState *state, struct IRInstr instr) {
+  switch (instr.kind) {
   case PushNum: {
-    struct Value val =
-        (struct Value){.kind = ValNum, .data.num = instr->data.num};
-    arrput(state->stack, val);
-  } break;
-  case DefineVar: {
-    assert(arrlen(state->stack) > 0);
-
-    if (shgetp_null(state->locals, instr->data.define)) {
-      assert(false && "TODO: Error handling: Redefining existing variable");
-      return;
-    }
-
-    struct Value val = arrpop(state->stack);
-    shput(state->locals, instr->data.define, val);
-  } break;
-  case LoadVar: {
-    typeof(*state->locals) *value;
-    if ((value = shgetp_null(state->locals, instr->data.load)) == NULL) {
-      if ((value = shgetp_null(state->globals, instr->data.load)) == NULL) {
-        assert(false && "TODO: Error handling: Accessing undefined variable");
-        return;
-      }
-    }
-    arrput(state->stack, value->value);
-  } break;
-  case StoreVar: {
-    assert(arrlen(state->stack) > 0);
-
-    typeof(*state->locals) *value;
-    if ((value = shgetp_null(state->locals, instr->data.load)) == NULL) {
-      if ((value = shgetp_null(state->globals, instr->data.load)) == NULL) {
-        assert(false && "TODO: Error handling: Accessing undefined variable");
-        return;
-      }
-    }
-
-    struct Value val = arrpop(state->stack);
-    value->value = val;
-    // TODO: Free old value
-  } break;
-  case ApplyOp: {
-    assert(arrlen(state->stack) >= 2);
-    // TODO: Free left/right
-    struct Value right = arrpop(state->stack);
-    struct Value left = arrpop(state->stack);
-
-    switch (instr->data.apply_op) {
-    case OpPlus: {
-      arrput(state->stack, value_add(left, right));
-    } break;
-    case OpMinus:
-    case OpAst:
-    case OpSlash:
-      assert(false && "TODO: Operator");
-      break;
-    }
+    arrpush(state->stack, value_num(instr.data.num));
   } break;
   case PushTemplate: {
-    struct Value str = eval_template(state, instr->data.tmp.parts,
-                                     instr->data.tmp.parts_length);
-    arrput(state->stack, str);
+    char *result =
+        eval_tmps(state, instr.data.tmp.parts, instr.data.tmp.parts_length);
+    arrpush(state->stack, value_str(result));
+    arrfree(result);
+  } break;
+  case PushPath: {
+    assert(false && "TODO: Paths");
   } break;
   case PushFn: {
-    struct Value fn =
-        (struct Value){.kind = ValFn,
-                       .data.fn.instrs = instr->data.fn.instrs,
-                       .data.fn.instrs_length = instr->data.fn.instrs_length};
-    arrput(state->stack, fn);
+    arrpush(state->stack,
+            value_func(instr.data.fn.instrs, instr.data.fn.instrs_length));
+  } break;
+  case LoadVar: {
+    typeof(*state->local) *kv;
+    if (!(kv = shgetp_null(state->local, instr.data.load))) {
+      if (!(kv = shgetp_null(state->global, instr.data.load))) {
+        assert(false && "TODO: Error handling, variable not defined");
+      }
+    }
+    struct Value v = value_shallowcpy(kv->value);
+    arrpush(state->stack, v);
+  } break;
+  case StoreVar: {
+    assert(arrlenu(state->stack) >= 1);
+    typeof(*state->local) *kv;
+    if (!(kv = shgetp_null(state->local, instr.data.store))) {
+      if (!(kv = shgetp_null(state->global, instr.data.store))) {
+        assert(false && "TODO: Error handling, variable not defined");
+      }
+    }
+    value_drop(kv->value);
+    struct Value v = arrpop(state->stack);
+    kv->value = v;
+    arrpush(state->stack, value_void());
+  } break;
+  case DefineVar: {
+    assert(arrlenu(state->stack) >= 1);
+    if (shgeti(state->local, instr.data.define) >= 0) {
+      assert(false &&
+             "TODO: Error handling, attempt to redefine existing variable");
+    }
+    struct Value v = arrpop(state->stack);
+    shput(state->local, instr.data.define, v);
+    arrpush(state->stack, value_void());
+  } break;
+  case Drop: {
+    struct Value v = arrpop(state->stack);
+    value_drop(v);
   } break;
   case CallFunction: {
-    assert(arrlen(state->stack) >= 1 + instr->data.call_fn);
+    assert(arrlenu(state->stack) >= instr.data.call_fn + 1);
     struct Value callee = arrpop(state->stack);
-    if (callee.kind != ValFn) {
-      assert(false && "TODO: Error handling: cannot call non-function");
+    if (callee.kind != ValFunc) {
+      assert(false && "TODO: Error handling, calling non-function value");
     }
 
-    struct ProgramState *call_scope = init_program();
-    for (size_t i = 0; i < shlen(state->globals); ++i) {
-      shput(call_scope->globals, state->globals[i].key, state->globals[i].value);
-    }
-    for (size_t i = 0; i < shlen(state->locals); ++i) {
-      shput(call_scope->globals, state->locals[i].key, state->locals[i].value);
-    }
-    for (size_t i = instr->data.call_fn - 1; ; --i) {
-      int len = snprintf(NULL, 0, "%zu", i);
-      char *s = malloc(sizeof(len) + 1);
-      snprintf(s, len + 1, "%zu", i);
-      shput(call_scope->locals, s, arrpop(state->stack));
+    struct ProgramState *subroutine = init_program();
 
-      if (i == 0) break;
+    // TODO: Allow writes to captured data
+    // TODO: This is completely borked, we need CoW variables.
+    for (size_t i = 0; i < shlenu(state->global); ++i) {
+      struct Value v = value_shallowcpy(state->global[i].value);
+      shput(subroutine->global, strdup(state->global[i].key), v);
     }
 
-    eval_program(call_scope, callee.data.fn.instrs, callee.data.fn.instrs_length);
-    if (arrlen(call_scope->stack) > 0) {
-      arrput(state->stack, arrpop(call_scope->stack));
+    for (size_t i = 0; i < shlenu(state->local); ++i) {
+      struct Value v = value_shallowcpy(state->local[i].value);
+
+      if (shgeti(subroutine->global, state->local[i].key) >= 0) {
+        value_drop(
+            shgetp_null(subroutine->global, state->local[i].key)->value);
+      }
+
+      shput(subroutine->global, strdup(state->local[i].key), v);
     }
-    // TODO: Free call_scope
+
+    for (size_t i = instr.data.call_fn - 1;; --i) {
+      int arg_name_len = snprintf(NULL, 0, "%zu", i);
+      char *arg_name = malloc(arg_name_len + 1);
+      snprintf(arg_name, arg_name_len + 1, "%zu", i);
+      struct Value arg = arrpop(state->stack);
+      shput(subroutine->local, arg_name, arg);
+      if (i == 0)
+        break;
+    }
+
+    for (size_t i = 0; i < arrlenu(callee.data.func); ++i)
+      eval_instr(subroutine, callee.data.func[i]);
+
+    assert(arrlenu(subroutine->stack) == 1 &&
+           "Subroutine must result in exactly 1 value");
+
+    struct Value ret = arrpop(subroutine->stack);
+    arrpush(state->stack, ret);
+
+    program_free(subroutine);
   } break;
-  case PushPath:
   case CallCommand:
+  case ApplyOp:
   case PipeTo:
-    assert(false && "TODO: Instruction");
     break;
   }
 }
 
 void eval_program(struct ProgramState *state, struct IRInstr *instrs,
                   size_t instrs_length) {
+  for (size_t i = 0; i < arrlenu(state->stack); ++i) {
+    value_drop(state->stack[i]);
+  }
   arrfree(state->stack);
-  state->stack = NULL;
+  state->stack = NULL; // Clearing stack to be safe
 
-  /* for (size_t i = 0; i < instrs_length; ++i) { */
-  /*   print_instruction(&instrs[i]); */
-  /* } */
+  for (size_t i = 0; i < instrs_length; ++i)
+    eval_instr(state, instrs[i]);
 
-  for (size_t i = 0; i < instrs_length; ++i) {
-    eval_instr(state, &instrs[i]);
-  }
+  assert(arrlenu(state->stack) == 1 &&
+         "Program must result in exactly 1 value");
 
-  printf("Final stack:\n");
-  for (size_t i = 0; i < arrlen(state->stack); ++i) {
-    printf("- %s\n", stringify(state->stack[i]).data.str);
-  }
+  char *s = value_as_string(state->stack[0]);
+  printf(">> %s\n", s);
+  arrfree(s);
 }

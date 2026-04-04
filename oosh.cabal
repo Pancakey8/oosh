@@ -80,7 +80,7 @@ executable oosh
 
     c-sources:        csrc/wrapper.c
 
-    cc-options:       -g -O0
+    cc-options:       -g -O0 -Wall -Wextra
 
     include-dirs:     csrc
 

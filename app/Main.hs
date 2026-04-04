@@ -10,15 +10,26 @@ import IR
 main :: IO ()
 main = do
   state <- initProgram
-  runInputT defaultSettings (loop state)
+  runInputT defaultSettings (loop state ""  False)
   where
-    loop :: ProgramStatePtr -> InputT IO ()
-    loop state = do
+    run :: ProgramStatePtr -> String -> IO ()
+    run state inp =
+      case runParser program () "" inp of
+        Right prog ->
+          let ir = compileProg prog
+          in do
+            mapM_ print ir
+            evalProgram state ir
+        Left err -> print err
+
+    loop :: ProgramStatePtr -> String -> Bool -> InputT IO ()
+    loop state acc isAccing = do
       minput <- getInputLine "$ "
       case minput of
         Nothing -> return ()
-        Just input -> do
-          case runParser program () "shell" input of
-            Right prog -> liftIO $ evalProgram state $ compileProg prog
-            Left err -> liftIO $ print err
-          loop state
+        Just input ->
+          case (input, isAccing) of
+            ("#{", False) -> loop state "" True
+            ("#}", True) -> liftIO (run state acc) >> loop state "" False
+            (str, False) -> liftIO (run state str) >> loop state "" False
+            (str, True) -> loop state (acc ++ str ++ "\n") True

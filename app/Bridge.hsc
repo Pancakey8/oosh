@@ -120,6 +120,9 @@ instance Storable IRInstr where
          OpJuxta -> error "Juxta can't appear here"
          OpPipe -> error "Pipe can't appear here") :: CInt)
 
+  poke ptr Drop = do
+    (#poke struct IRInstr, kind) ptr ((#const Drop) :: CInt)
+
   peek _ = error "C->HS interaction not implemented"
 
 type ProgramStatePtr = Ptr ()
