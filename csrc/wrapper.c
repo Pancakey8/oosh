@@ -155,17 +155,53 @@ void instr_free(struct IRInstr instr) {
   }
 }
 
+struct VarKV {
+  char *key;
+  struct Variable *value;
+};
+
 struct Value {
   enum ValueKind { ValNum, ValStr, ValFunc, ValVoid } kind;
 
   union {
     double num;
     char *stb(str);
-    struct IRInstr *stb(func);
+    struct {
+      struct IRInstr *stb(instrs);
+      struct VarKV *stb(captures);
+    } func;
   } data;
 
   size_t *rc;
 };
+
+struct Variable {
+  struct Value value;
+  size_t rc;
+};
+
+struct Variable *var_from_value(struct Value *val) {
+  struct Variable *var = calloc(1, sizeof(struct Variable));
+  var->value = *val;
+  var->rc = 1;
+  *val = (struct Value){0};
+  return var;
+}
+
+struct Variable *var_keep(struct Variable *var) {
+  var->rc++;
+  return var;
+}
+
+void var_drop(struct Variable *var) {
+  if (var->rc > 1) {
+    --var->rc;
+    return;
+  }
+
+  value_drop(var->value);
+  free(var);
+}
 
 struct Value value_num(double n) {
   return (struct Value){.kind = ValNum, .data.num = n, .rc = NULL};
@@ -182,12 +218,14 @@ struct Value value_str(char const *str) {
 }
 
 struct Value value_func(struct IRInstr const *instrs, size_t instrs_length) {
-  struct Value val = (struct Value){
-      .kind = ValFunc, .data.func = NULL, .rc = malloc(sizeof(size_t))};
+  struct Value val =
+      (struct Value){.kind = ValFunc,
+                     .data.func = {.instrs = NULL, .captures = NULL},
+                     .rc = malloc(sizeof(size_t))};
   *val.rc = 1;
-  arrsetlen(val.data.func, instrs_length);
+  arrsetlen(val.data.func.instrs, instrs_length);
   for (size_t i = 0; i < instrs_length; ++i) {
-    val.data.func[i] = instr_copy(instrs[i]);
+    val.data.func.instrs[i] = instr_copy(instrs[i]);
   }
   return val;
 }
@@ -220,10 +258,15 @@ struct Value value_own(struct Value val) {
   } break;
 
   case ValFunc: {
-    owned.data.func = NULL;
-    arrsetlen(owned.data.func, arrlenu(val.data.func));
-    for (size_t i = 0; i < arrlenu(val.data.func); ++i) {
-      owned.data.func[i] = instr_copy(val.data.func[i]);
+    owned.data.func.instrs = NULL;
+    arrsetlen(owned.data.func.instrs, arrlenu(val.data.func.instrs));
+    for (size_t i = 0; i < arrlenu(val.data.func.instrs); ++i) {
+      owned.data.func.instrs[i] = instr_copy(val.data.func.instrs[i]);
+    }
+    owned.data.func.captures = NULL;
+    for (size_t i = 0; i < shlenu(val.data.func.captures); ++i) {
+      shput(owned.data.func.captures, strdup(val.data.func.captures[i].key),
+            var_keep(val.data.func.captures[i].value));
     }
   } break;
 
@@ -251,9 +294,14 @@ void value_drop(struct Value val) {
   } break;
 
   case ValFunc: {
-    for (size_t i = 0; i < arrlenu(val.data.func); ++i)
-      instr_free(val.data.func[i]);
-    arrfree(val.data.func);
+    for (size_t i = 0; i < arrlenu(val.data.func.instrs); ++i)
+      instr_free(val.data.func.instrs[i]);
+    arrfree(val.data.func.instrs);
+    for (size_t i = 0; i < shlenu(val.data.func.captures); ++i) {
+      free(val.data.func.captures[i].key);
+      var_drop(val.data.func.captures[i].value);
+    }
+    shfree(val.data.func.captures);
   } break;
 
   case ValNum:
@@ -296,10 +344,7 @@ char *stb(value_as_string)(struct Value val) {
 }
 
 struct ProgramState {
-  struct {
-    char *key;
-    struct Value value;
-  } *stb(local), *stb(global);
+  struct VarKV *stb(local), *stb(global);
 
   // Evaluation stack
   struct Value *stb(stack);
@@ -311,8 +356,9 @@ struct ProgramState *init_program() {
 }
 
 void program_free(struct ProgramState *state) {
-  if (!state) return;
-  
+  if (!state)
+    return;
+
   if (state->stack) {
     for (size_t i = 0; i < arrlenu(state->stack); ++i)
       value_drop(state->stack[i]);
@@ -320,14 +366,18 @@ void program_free(struct ProgramState *state) {
   }
 
   if (state->local) {
-    for (size_t i = 0; i < shlenu(state->local); ++i)
-      value_drop(state->local[i].value);
+    for (size_t i = 0; i < shlenu(state->local); ++i) {
+      free(state->local[i].key);
+      var_drop(state->local[i].value);
+    }
     shfree(state->local);
   }
 
   if (state->global) {
-    for (size_t i = 0; i < shlenu(state->global); ++i)
-      value_drop(state->global[i].value);
+    for (size_t i = 0; i < shlenu(state->global); ++i) {
+      free(state->global[i].key);
+      var_drop(state->global[i].value);
+    }
     shfree(state->global);
   }
 
@@ -347,13 +397,13 @@ char *stb(eval_tmps)(struct ProgramState *state, struct TemplatePart *parts,
       memcpy(&res[len], parts[i].data.exact, part_len + 1);
     } break;
     case TempVar: {
-      typeof(*state->local) *kv;
+      struct VarKV *kv;
       if (!(kv = shgetp_null(state->local, parts[i].data.var))) {
         if (!(kv = shgetp_null(state->global, parts[i].data.var))) {
           assert(false && "TODO: Error handling, variable not defined");
         }
       }
-      char *s = value_as_string(kv->value);
+      char *s = value_as_string(kv->value->value);
       size_t len = arrlenu(res) - 1;
       size_t s_len = arrlenu(s) - 1;
       arrsetlen(res, len + s_len + 1);
@@ -379,31 +429,41 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
   case PushPath: {
     assert(false && "TODO: Paths");
   } break;
-  case PushFn: {
-    arrpush(state->stack,
-            value_func(instr.data.fn.instrs, instr.data.fn.instrs_length));
+  case PushFn: {     // TODO: This might be fragile
+    struct Value fn =
+        value_func(instr.data.fn.instrs, instr.data.fn.instrs_length);
+    for (size_t i = 0; i < shlenu(state->local); ++i) {
+      struct VarKV kv = state->local[i];
+      shput(fn.data.func.captures, strdup(kv.key), var_keep(kv.value));
+    }
+    for (size_t i = 0; i < shlenu(state->global); ++i) {
+      struct VarKV kv = state->global[i];
+      if (shgeti(fn.data.func.captures, kv.key) < 0)
+        shput(fn.data.func.captures, strdup(kv.key), var_keep(kv.value));
+    }
+    arrpush(state->stack, fn);
   } break;
   case LoadVar: {
-    typeof(*state->local) *kv;
+    struct VarKV *kv;
     if (!(kv = shgetp_null(state->local, instr.data.load))) {
       if (!(kv = shgetp_null(state->global, instr.data.load))) {
         assert(false && "TODO: Error handling, variable not defined");
       }
     }
-    struct Value v = value_shallowcpy(kv->value);
+    struct Value v = value_shallowcpy(kv->value->value);
     arrpush(state->stack, v);
   } break;
   case StoreVar: {
     assert(arrlenu(state->stack) >= 1);
-    typeof(*state->local) *kv;
+    struct VarKV *kv;
     if (!(kv = shgetp_null(state->local, instr.data.store))) {
       if (!(kv = shgetp_null(state->global, instr.data.store))) {
         assert(false && "TODO: Error handling, variable not defined");
       }
     }
-    value_drop(kv->value);
+    value_drop(kv->value->value);
     struct Value v = arrpop(state->stack);
-    kv->value = v;
+    kv->value->value = v;
     arrpush(state->stack, value_void());
   } break;
   case DefineVar: {
@@ -413,7 +473,7 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
              "TODO: Error handling, attempt to redefine existing variable");
     }
     struct Value v = arrpop(state->stack);
-    shput(state->local, instr.data.define, v);
+    shput(state->local, instr.data.define, var_from_value(&v));
     arrpush(state->stack, value_void());
   } break;
   case Drop: {
@@ -423,28 +483,17 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
   case CallFunction: {
     assert(arrlenu(state->stack) >= instr.data.call_fn + 1);
     struct Value callee = arrpop(state->stack);
+
     if (callee.kind != ValFunc) {
       assert(false && "TODO: Error handling, calling non-function value");
     }
 
     struct ProgramState *subroutine = init_program();
-
-    // TODO: Allow writes to captured data
-    // TODO: This is completely borked, we need CoW variables.
-    for (size_t i = 0; i < shlenu(state->global); ++i) {
-      struct Value v = value_shallowcpy(state->global[i].value);
-      shput(subroutine->global, strdup(state->global[i].key), v);
-    }
-
-    for (size_t i = 0; i < shlenu(state->local); ++i) {
-      struct Value v = value_shallowcpy(state->local[i].value);
-
-      if (shgeti(subroutine->global, state->local[i].key) >= 0) {
-        value_drop(
-            shgetp_null(subroutine->global, state->local[i].key)->value);
-      }
-
-      shput(subroutine->global, strdup(state->local[i].key), v);
+    
+    // TODO: This might be fragile
+    for (size_t i = 0; i < shlenu(callee.data.func.captures); ++i) {
+      struct VarKV kv = callee.data.func.captures[i];
+      shput(subroutine->global, strdup(kv.key), var_keep(kv.value));
     }
 
     for (size_t i = instr.data.call_fn - 1;; --i) {
@@ -452,13 +501,13 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
       char *arg_name = malloc(arg_name_len + 1);
       snprintf(arg_name, arg_name_len + 1, "%zu", i);
       struct Value arg = arrpop(state->stack);
-      shput(subroutine->local, arg_name, arg);
+      shput(subroutine->local, arg_name, var_from_value(&arg));
       if (i == 0)
         break;
     }
 
-    for (size_t i = 0; i < arrlenu(callee.data.func); ++i)
-      eval_instr(subroutine, callee.data.func[i]);
+    for (size_t i = 0; i < arrlenu(callee.data.func.instrs); ++i)
+      eval_instr(subroutine, callee.data.func.instrs[i]);
 
     assert(arrlenu(subroutine->stack) == 1 &&
            "Subroutine must result in exactly 1 value");
