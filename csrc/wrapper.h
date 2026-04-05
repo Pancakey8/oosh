@@ -27,7 +27,7 @@ struct PathPart {
 struct PathPart path_copy(struct PathPart part);
 void path_free(struct PathPart part);
 
-enum Operator { OpPlus, OpMinus, OpAst, OpSlash };
+enum Operator { OpPlus, OpMinus, OpAst, OpSlash, OpIndex };
 
 struct IRInstr {
   enum IRInstrKind {

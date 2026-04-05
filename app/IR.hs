@@ -49,6 +49,9 @@ compileExpr ex@(BinaryExpr OpJuxta _ _) =
     (callee:args) -> concatMap compileExpr args ++ compileExpr callee ++  [CallFunction (length args)]
     _ -> error "Juxta on a single node (?)"
 compileExpr (BinaryExpr op l r) = compileExpr l ++ compileExpr r ++ [ApplyOp op]
+compileExpr (UnaryExpr op l) =
+  case op of
+    OpNullCall -> compileExpr l ++ [CallFunction 0]
 compileExpr (CommandExpr name args) =
   map (PushTemplate . map templatifyContent) args ++ [commandName name, CallCommand (length args)]
   where

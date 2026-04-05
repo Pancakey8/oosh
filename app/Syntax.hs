@@ -1,10 +1,10 @@
 module Syntax where
 
+import Control.Applicative (empty)
 import Data.Char
 import Data.List
 import Text.Parsec
 import Text.Parsec.String
-import Control.Applicative (empty)
 
 data StrContent
   = Exact String
@@ -27,7 +27,10 @@ data Literal
   | FunctionLit [Statement]
   deriving (Show)
 
-data Operator = OpPipe | OpPlus | OpMinus | OpAst | OpSlash | OpJuxta
+data Operator = OpPipe | OpPlus | OpMinus | OpAst | OpSlash | OpJuxta | OpIndex
+  deriving (Show)
+
+data UnaryOperator = OpNullCall
   deriving (Show)
 
 data CommandName
@@ -38,6 +41,7 @@ data CommandName
 data Expr
   = LitExpr Literal
   | BinaryExpr Operator Expr Expr
+  | UnaryExpr UnaryOperator Expr
   | GroupExpr Expr
   | CommandExpr CommandName [[StrContent]]
   deriving (Show)
@@ -126,7 +130,15 @@ commandExpr = do
     getArgs = manyTill getArg (try terminator)
 
     terminator :: Parser String
-    terminator = lookAhead (symbol "|" <|> string "\n" <|> (eof >> pure "") <|> string ")" <|> string ";")
+    terminator =
+      lookAhead
+        ( symbol "|"
+            <|> string "\n"
+            <|> (eof >> pure "")
+            <|> string ")"
+            <|> string ";"
+            <|> string "]"
+        )
 
     isWordEnd :: Char -> Bool
     isWordEnd c = isSpace c || c `elem` ['\n', '|', '"', '\'', ')', ';']
@@ -138,7 +150,7 @@ commandExpr = do
     autoArg = do
       first <- satisfy (\c -> isAlpha c || c `elem` permitted)
       name <- many (satisfy (\c -> isAlphaNum c || c `elem` permitted))
-      pure $ Auto (first:name)
+      pure $ Auto (first : name)
       where
         permitted = ['_', '.', '/', '-']
 
@@ -168,14 +180,18 @@ commandExpr = do
 
 nudExpr :: Bool -> Parser Expr
 nudExpr allowCmd =
-    (if allowCmd
+  ( if allowCmd
       then commandExpr
-      else empty)
+      else empty
+  )
     <|> (LitExpr <$> literal)
     <|> (GroupExpr <$> (symbol "(" *> ledExpr True 0 <* symbol ")"))
 
 operators :: [(String, Operator, Int)]
 operators = [("|", OpPipe, 10), ("+", OpPlus, 20), ("-", OpMinus, 20), ("*", OpAst, 30), ("/", OpSlash, 30)]
+
+suffixOperators :: [(String, Int)]
+suffixOperators = [("[", 50), ("()", 50)]
 
 juxtaPrec :: Int
 juxtaPrec = 40
@@ -188,33 +204,55 @@ ledExpr allowCmd minPrec = do
     fst3 :: (a, b, c) -> a
     fst3 (x, _, _) = x
 
-    findOp :: String -> (String, Operator, Int)
-    findOp s = head [info | info@(str, _, _) <- operators, str == s]
+    findOp :: [(String, Operator, Int)] -> String -> (String, Operator, Int)
+    findOp ops s = head [info | info@(str, _, _) <- ops, str == s]
 
     go :: Expr -> Parser Expr
     go left = do
       maybeOp <- optionMaybe $ try $ lookAhead $ choice (map (try . symbol . fst3) operators)
       case maybeOp of
         Just opStr -> do
-          let (_, opKind, prec) = findOp opStr
+          let (_, opKind, prec) = findOp operators opStr
           if prec >= minPrec
             then do
               _ <- symbol opStr
-              right <- ledExpr (case opKind of
-                                  OpPipe -> True
-                                  _ -> False) (prec + 1)
+              right <-
+                ledExpr
+                  ( case opKind of
+                      OpPipe -> True
+                      _ -> False
+                  )
+                  (prec + 1)
               go (BinaryExpr opKind left right)
             else pure left
         Nothing -> do
-          next <- optionMaybe (lookAhead (lexeme (nudExpr False)))
-          case next of
-            Just _ ->
-              if juxtaPrec >= minPrec
-                then do
-                  right <- ledExpr False (juxtaPrec + 1)
-                  go (BinaryExpr OpJuxta left right)
-                else pure left
-            Nothing -> pure left
+          -- Suffix operators
+          maybeSuffix <- optionMaybe $ try $ lookAhead $ choice (map (try . symbol . fst) suffixOperators)
+          case maybeSuffix of
+            Just opStr ->
+              let (_, prec) = head [info | info@(str, _) <- suffixOperators, str == opStr]
+               in if prec >= minPrec
+                    then case opStr of
+                      "[" -> do
+                        _ <- symbol "["
+                        ex <- ledExpr True 0
+                        _ <- symbol "]"
+                        go (BinaryExpr OpIndex left ex)
+                      "()" -> do
+                        _ <- symbol "()"
+                        go (UnaryExpr OpNullCall left)
+                      _ -> error "Unhandled suffix operator"
+                    else pure left
+            Nothing -> do
+              next <- optionMaybe (lookAhead (lexeme (nudExpr False)))
+              case next of
+                Just _ ->
+                  if juxtaPrec >= minPrec
+                    then do
+                      right <- ledExpr False (juxtaPrec + 1)
+                      go (BinaryExpr OpJuxta left right)
+                    else pure left
+                Nothing -> pure left
 
 defVarStmt :: Parser Statement
 defVarStmt = do

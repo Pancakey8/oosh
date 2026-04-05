@@ -121,6 +121,7 @@ instance Storable IRInstr where
          OpMinus -> (#const OpMinus)
          OpAst -> (#const OpAst)
          OpSlash -> (#const OpSlash)
+         OpIndex -> (#const OpIndex)
          OpJuxta -> error "Juxta can't appear here"
          OpPipe -> error "Pipe can't appear here") :: CInt)
 
