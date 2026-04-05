@@ -26,7 +26,7 @@ main = do
     loop state acc isAccing = do
       minput <- getInputLine "$ "
       case minput of
-        Nothing -> return ()
+        Nothing -> liftIO (freeProgram state)
         Just input ->
           case (input, isAccing) of
             ("#{", False) -> loop state "" True

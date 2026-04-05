@@ -473,7 +473,7 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
              "TODO: Error handling, attempt to redefine existing variable");
     }
     struct Value v = arrpop(state->stack);
-    shput(state->local, instr.data.define, var_from_value(&v));
+    shput(state->local, strdup(instr.data.define), var_from_value(&v));
     arrpush(state->stack, value_void());
   } break;
   case Drop: {
@@ -516,6 +516,7 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
     arrpush(state->stack, ret);
 
     program_free(subroutine);
+    value_drop(callee);
   } break;
   case CallCommand:
   case ApplyOp:
@@ -541,4 +542,8 @@ void eval_program(struct ProgramState *state, struct IRInstr *instrs,
   char *s = value_as_string(state->stack[0]);
   printf(">> %s\n", s);
   arrfree(s);
+
+  for (size_t i = 0; i < instrs_length; ++i)
+    instr_free(instrs[i]);
+  free(instrs);
 }

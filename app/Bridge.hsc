@@ -129,6 +129,7 @@ type ProgramStatePtr = Ptr ()
 
 foreign import ccall "eval_program" c_evalProgram :: ProgramStatePtr -> Ptr IRInstr -> CSize -> IO () 
 foreign import ccall "init_program" initProgram :: IO ProgramStatePtr
+foreign import ccall "program_free" freeProgram :: ProgramStatePtr -> IO ()
 
 evalProgram :: ProgramStatePtr -> [IRInstr] -> IO ()
 evalProgram state prog = do

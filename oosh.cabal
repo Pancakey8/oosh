@@ -1,4 +1,4 @@
-cabal-version:      3.0
+cabal-version:      3.6
 -- The cabal-version field refers to the version of the .cabal specification,
 -- and can be different from the cabal-install (the tool) version and the
 -- Cabal (the library) version you are using. As such, the Cabal (the library)
@@ -80,7 +80,10 @@ executable oosh
 
     c-sources:        csrc/wrapper.c
 
-    cc-options:       -g -O0 -Wall -Wextra
+    cc-options:       -g -O0 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer
+    hsc2hs-options:   "--lflag=-fsanitize=address,undefined" "--cflag=-fsanitize=address,undefined"
+    ghc-options:      -optc-fsanitize=address,undefined
+                      -optl-fsanitize=address,undefined
 
     include-dirs:     csrc
 
