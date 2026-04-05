@@ -107,6 +107,7 @@ struct IRInstr instr_copy(struct IRInstr instr) {
   } break;
 
   case PushNum:
+  case PushArray:
   case CallCommand:
   case CallFunction:
   case ApplyOp:
@@ -146,6 +147,7 @@ void instr_free(struct IRInstr instr) {
     break;
 
   case PushNum:
+  case PushArray:
   case CallCommand:
   case CallFunction:
   case ApplyOp:
@@ -161,11 +163,12 @@ struct VarKV {
 };
 
 struct Value {
-  enum ValueKind { ValNum, ValStr, ValFunc, ValVoid } kind;
+  enum ValueKind { ValNum, ValStr, ValFunc, ValArray, ValVoid } kind;
 
   union {
     double num;
     char *stb(str);
+    struct Value *stb(array);
     struct {
       struct IRInstr *stb(instrs);
       struct VarKV *stb(captures);
@@ -230,6 +233,16 @@ struct Value value_func(struct IRInstr const *instrs, size_t instrs_length) {
   return val;
 }
 
+struct Value value_array(struct Value *vals, size_t vals_length) {
+  struct Value val = (struct Value){
+      .kind = ValArray, .data.array = NULL, .rc = malloc(sizeof(size_t))};
+  *val.rc = 1;
+  arrsetlen(val.data.array, vals_length);
+  for (size_t i = 0; i < vals_length; ++i)
+    val.data.array[i] = value_shallowcpy(vals[i]);
+  return val;
+}
+
 struct Value value_void(void) {
   return (struct Value){.kind = ValVoid, .data = {0}, .rc = NULL};
 }
@@ -270,6 +283,13 @@ struct Value value_own(struct Value val) {
     }
   } break;
 
+  case ValArray: {
+    owned.data.array = NULL;
+    arrsetlen(owned.data.array, arrlenu(val.data.array));
+    for (size_t i = 0; i < arrlenu(val.data.array); ++i)
+      owned.data.array[i] = value_shallowcpy(val.data.array[i]);
+  } break;
+
   case ValNum:
   case ValVoid:
     assert(false && "Unreachable since rc == NULL");
@@ -304,6 +324,13 @@ void value_drop(struct Value val) {
     shfree(val.data.func.captures);
   } break;
 
+  case ValArray: {
+    for (size_t i = 0; i < arrlenu(val.data.array); ++i) {
+      value_drop(val.data.array[i]);
+    }
+    arrfree(val.data.array);
+  } break;
+
   case ValNum:
   case ValVoid:
     assert(false && "Unreachable since rc == NULL");
@@ -331,6 +358,33 @@ char *stb(value_as_string)(struct Value val) {
     char *str = NULL;
     arrsetlen(str, strlen(fn) + 1);
     strcpy(str, fn);
+    return str;
+  } break;
+  case ValArray: {
+    char *str = NULL;
+    arrput(str, '[');
+    arrput(str, ' ');
+
+    for (size_t i = 0; i < arrlenu(val.data.array); i++) {
+      char *element_str = value_as_string(val.data.array[i]);
+
+      if (i > 0) {
+        arrput(str, ',');
+        arrput(str, ' ');
+      }
+
+      size_t el_len = arrlenu(element_str) - 1;
+      size_t current_len = arrlenu(str);
+
+      arrsetlen(str, current_len + el_len);
+      memcpy(str + current_len, element_str, el_len);
+
+      arrfree(element_str);
+    }
+
+    arrput(str, ' ');
+    arrput(str, ']');
+    arrput(str, '\0');
     return str;
   } break;
   case ValVoid: {
@@ -429,7 +483,23 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
   case PushPath: {
     assert(false && "TODO: Paths");
   } break;
-  case PushFn: {     // TODO: This might be fragile
+  case PushArray: {
+    size_t n = instr.data.push_array;
+    assert(arrlenu(state->stack) >= n);
+    struct Value *vals = calloc(n, sizeof(struct Value));
+    if (n != 0) {
+      for (size_t i = n - 1;; --i) {
+        vals[i] = arrpop(state->stack);
+        if (i == 0)
+          break;
+      }
+    }
+    arrpush(state->stack, value_array(vals, n));
+    for (size_t i = 0; i < n; ++i)
+      value_drop(vals[i]);
+    free(vals);
+  } break;
+  case PushFn: { // TODO: This might be fragile
     struct Value fn =
         value_func(instr.data.fn.instrs, instr.data.fn.instrs_length);
     for (size_t i = 0; i < shlenu(state->local); ++i) {
@@ -489,21 +559,23 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
     }
 
     struct ProgramState *subroutine = init_program();
-    
+
     // TODO: This might be fragile
     for (size_t i = 0; i < shlenu(callee.data.func.captures); ++i) {
       struct VarKV kv = callee.data.func.captures[i];
       shput(subroutine->global, strdup(kv.key), var_keep(kv.value));
     }
 
-    for (size_t i = instr.data.call_fn - 1;; --i) {
-      int arg_name_len = snprintf(NULL, 0, "%zu", i);
-      char *arg_name = malloc(arg_name_len + 1);
-      snprintf(arg_name, arg_name_len + 1, "%zu", i);
-      struct Value arg = arrpop(state->stack);
-      shput(subroutine->local, arg_name, var_from_value(&arg));
-      if (i == 0)
-        break;
+    if (instr.data.call_fn != 0) {
+      for (size_t i = instr.data.call_fn - 1;; --i) {
+        int arg_name_len = snprintf(NULL, 0, "%zu", i);
+        char *arg_name = malloc(arg_name_len + 1);
+        snprintf(arg_name, arg_name_len + 1, "%zu", i);
+        struct Value arg = arrpop(state->stack);
+        shput(subroutine->local, arg_name, var_from_value(&arg));
+        if (i == 0)
+          break;
+      }
     }
 
     for (size_t i = 0; i < arrlenu(callee.data.func.instrs); ++i)

@@ -20,6 +20,7 @@ data IRInstr
   | PushTemplate [TemplatePart]
   | PushPath [PathPart]
   | PushFn [IRInstr]
+  | PushArray Int
   | LoadVar String
   | StoreVar String
   | DefineVar String
@@ -62,6 +63,7 @@ compileLit (StrLit contents) = [PushTemplate (map templatifyContent contents)]
 compileLit (VarLit name) = [LoadVar name]
 compileLit (PathLit parts) = [PushPath (map pathifyContent parts)]
 compileLit (FunctionLit body) = [PushFn (compileProg body)]
+compileLit (ArrayLit exs) = concatMap compileExpr exs ++ [PushArray (length exs)]
 
 templatifyContent :: StrContent -> TemplatePart
 templatifyContent (Exact s) = TempExact s

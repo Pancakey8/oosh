@@ -53,6 +53,11 @@ extra-doc-files:    CHANGELOG.md
 common warnings
     ghc-options: -Wall
 
+flag debug
+  description: Enable debug symbols and C sanitizers
+  default:     False
+  manual:      True
+
 executable oosh
     -- Import common warning flags.
     import:           warnings
@@ -80,10 +85,14 @@ executable oosh
 
     c-sources:        csrc/wrapper.c
 
-    cc-options:       -g -O0 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer
-    hsc2hs-options:   "--lflag=-fsanitize=address,undefined" "--cflag=-fsanitize=address,undefined"
-    ghc-options:      -optc-fsanitize=address,undefined
-                      -optl-fsanitize=address,undefined
+    if flag(debug)
+        cc-options:       -g -O0 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer
+        hsc2hs-options:   "--lflag=-fsanitize=address,undefined" "--cflag=-fsanitize=address,undefined"
+        ghc-options:      -optc-fsanitize=address,undefined
+                          -optl-fsanitize=address,undefined
+    else
+        cc-options:       -O2
+        ghc-options:      -O2
 
     include-dirs:     csrc
 

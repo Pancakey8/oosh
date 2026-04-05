@@ -23,6 +23,7 @@ data Literal
   | StrLit [StrContent]
   | VarLit String
   | PathLit [PathContent]
+  | ArrayLit [Expr]
   | FunctionLit [Statement]
   deriving (Show)
 
@@ -91,8 +92,17 @@ functionLit = do
   _ <- symbol "}"
   pure $ FunctionLit stmts
 
+arrayLit :: Parser Literal
+arrayLit = do
+  _ <- symbol "["
+  spaces
+  elems <- ledExpr True 0 `sepEndBy` try (spaces *> char ',' <* spaces)
+  spaces
+  _ <- symbol "]"
+  pure $ ArrayLit elems
+
 literal :: Parser Literal
-literal = stringLit <|> numberLit <|> varLit <|> pathLit <|> functionLit
+literal = stringLit <|> numberLit <|> varLit <|> pathLit <|> functionLit <|> arrayLit
 
 hSpaces :: Parser ()
 hSpaces = skipMany (oneOf [' ', '\t'])

@@ -83,6 +83,10 @@ instance Storable IRInstr where
     (#poke struct IRInstr, data.fn.instrs) ptr array
     (#poke struct IRInstr, data.fn.instrs_length) ptr len
 
+  poke ptr (PushArray n) = do
+    (#poke struct IRInstr, kind) ptr ((#const PushArray) :: CInt)
+    (#poke struct IRInstr, data.push_array) ptr (fromIntegral n :: CSize)
+
   poke ptr (LoadVar s) = do
     (#poke struct IRInstr, kind) ptr ((#const LoadVar) :: CInt)
     cstr <- newCString s

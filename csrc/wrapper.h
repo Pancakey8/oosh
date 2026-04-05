@@ -35,6 +35,7 @@ struct IRInstr {
     PushTemplate,
     PushPath,
     PushFn,
+    PushArray,
     LoadVar,
     StoreVar,
     DefineVar,
@@ -64,6 +65,7 @@ struct IRInstr {
     char *define;
     size_t call_cmd;
     size_t call_fn;
+    size_t push_array;
     enum Operator apply_op;
   } data;
 };
@@ -79,6 +81,7 @@ struct Value;
 struct Value value_num(double n);
 struct Value value_str(char const *str);
 struct Value value_func(struct IRInstr const *instrs, size_t instrs_length);
+struct Value value_array(struct Value *vals, size_t vals_length);
 struct Value value_void(void);
 
 struct Value value_shallowcpy(struct Value val);
