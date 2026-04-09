@@ -43,7 +43,7 @@ compileExpr :: Expr -> [IRInstr]
 compileExpr (LitExpr lit) = compileLit lit
 compileExpr (GroupExpr inside) = compileExpr inside
 compileExpr (BinaryExpr OpPipe l r) =
-  compileExpr l ++ [PipeTo] ++ compileExpr r
+  compileExpr l ++ compileExpr r ++ [PipeTo]
 compileExpr ex@(BinaryExpr OpJuxta _ _) =
   case flattenJuxta ex of
     (callee:args) -> concatMap compileExpr args ++ compileExpr callee ++  [CallFunction (length args)]

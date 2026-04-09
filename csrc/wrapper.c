@@ -163,7 +163,7 @@ struct VarKV {
 };
 
 struct Value {
-  enum ValueKind { ValNum, ValStr, ValFunc, ValArray, ValVoid } kind;
+  enum ValueKind { ValNum, ValStr, ValFunc, ValArray, ValVoid, ValThunk } kind;
 
   union {
     double num;
@@ -173,9 +173,32 @@ struct Value {
       struct IRInstr *stb(instrs);
       struct VarKV *stb(captures);
     } func;
+    struct ThunkValue *thunk;
   } data;
 
   size_t *rc;
+};
+
+struct ThunkValue {
+  enum ThunkValueKind { ThunkProc, ThunkFunc, ThunkVal, ThunkPipe } kind;
+
+  union {
+    struct {
+      char *name;
+      char **stb(args);
+    } proc;
+
+    struct {
+      struct Value callee;
+      struct ProgramState *state;
+    } func;
+
+    struct Value val;
+
+    struct {
+      struct ThunkValue *from, *to;
+    } pipe;
+  } data;
 };
 
 struct Variable {
@@ -255,7 +278,8 @@ struct Value value_shallowcpy(struct Value val) {
 }
 
 struct Value value_own(struct Value val) {
-  if (!val.rc || *val.rc == 1)
+  if (val.kind == ValNum || val.kind == ValVoid || val.kind == ValThunk ||
+      *val.rc == 1)
     return val;
   *val.rc -= 1;
 
@@ -292,15 +316,19 @@ struct Value value_own(struct Value val) {
 
   case ValNum:
   case ValVoid:
-    assert(false && "Unreachable since rc == NULL");
+  case ValThunk:
+    assert(false && "Unreachable");
     break;
   }
 
   return owned;
 }
 
+void eval_thunk(struct ThunkValue *thunk);
+struct Value value_real(struct Value *value);
+
 void value_drop(struct Value val) {
-  if (!val.rc)
+  if (val.kind == ValVoid || val.kind == ValNum)
     return;
   if (*val.rc > 1) {
     (*val.rc)--;
@@ -331,9 +359,15 @@ void value_drop(struct Value val) {
     arrfree(val.data.array);
   } break;
 
+  case ValThunk: {
+    eval_thunk(val.data.thunk);
+    value_drop(val.data.thunk->data.val);
+    free(val.data.thunk);
+  } break;
+
   case ValNum:
   case ValVoid:
-    assert(false && "Unreachable since rc == NULL");
+    assert(false && "Unreachable");
     break;
   }
 }
@@ -386,6 +420,13 @@ char *stb(value_as_string)(struct Value val) {
     arrput(str, ']');
     arrput(str, '\0');
     return str;
+  } break;
+  case ValThunk: {
+    struct Value cpy = value_shallowcpy(val);
+    cpy = value_real(&cpy);
+    char *s = value_as_string(cpy);
+    value_drop(cpy);
+    return s;
   } break;
   case ValVoid: {
     char *vd = "<void>";
@@ -469,6 +510,51 @@ char *stb(eval_tmps)(struct ProgramState *state, struct TemplatePart *parts,
   return res;
 }
 
+void eval_instr(struct ProgramState *state, struct IRInstr instr);
+
+void eval_thunk(struct ThunkValue *thunk) {
+  switch (thunk->kind) {
+  case ThunkProc: {
+    // TODO: Evaluate processes
+  } break;
+  case ThunkFunc: {
+    assert(thunk->data.func.callee.kind == ValFunc &&
+           "Thunk can't store non-function callee");
+    for (size_t i = 0; i < arrlenu(thunk->data.func.callee.data.func.instrs);
+         ++i) {
+      eval_instr(thunk->data.func.state,
+                 thunk->data.func.callee.data.func.instrs[i]);
+    }
+
+    assert(arrlenu(thunk->data.func.state->stack) == 1 &&
+           "Function must result in one value");
+    struct Value res = arrpop(thunk->data.func.state->stack);
+    struct ThunkValue next = {.kind = ThunkVal, .data.val = res};
+
+    program_free(thunk->data.func.state);
+    value_drop(thunk->data.func.callee);
+
+    *thunk = next;
+  } break;
+  case ThunkVal: {
+    // Already evaluated
+  } break;
+  case ThunkPipe: {
+    // TODO: Evaluate pipes
+  } break;
+  }
+}
+
+struct Value value_real(struct Value *value) {
+  struct Value mov = *value;
+  *value = (struct Value){0};
+  if (mov.kind != ValThunk) return mov;
+  eval_thunk(mov.data.thunk);
+  struct Value res = value_shallowcpy(mov.data.thunk->data.val);
+  value_drop(mov);
+  return res;
+}
+
 void eval_instr(struct ProgramState *state, struct IRInstr instr) {
   switch (instr.kind) {
   case PushNum: {
@@ -489,7 +575,8 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
     struct Value *vals = calloc(n, sizeof(struct Value));
     if (n != 0) {
       for (size_t i = n - 1;; --i) {
-        vals[i] = arrpop(state->stack);
+        struct Value v = arrpop(state->stack);
+        vals[i] = value_real(&v);
         if (i == 0)
           break;
       }
@@ -533,7 +620,7 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
     }
     value_drop(kv->value->value);
     struct Value v = arrpop(state->stack);
-    kv->value->value = v;
+    kv->value->value = value_real(&v);
     arrpush(state->stack, value_void());
   } break;
   case DefineVar: {
@@ -543,6 +630,7 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
              "TODO: Error handling, attempt to redefine existing variable");
     }
     struct Value v = arrpop(state->stack);
+    v = value_real(&v);
     shput(state->local, strdup(instr.data.define), var_from_value(&v));
     arrpush(state->stack, value_void());
   } break;
@@ -553,6 +641,7 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
   case CallFunction: {
     assert(arrlenu(state->stack) >= instr.data.call_fn + 1);
     struct Value callee = arrpop(state->stack);
+    callee = value_real(&callee);
 
     if (callee.kind != ValFunc) {
       assert(false && "TODO: Error handling, calling non-function value");
@@ -572,23 +661,21 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
         char *arg_name = malloc(arg_name_len + 1);
         snprintf(arg_name, arg_name_len + 1, "%zu", i);
         struct Value arg = arrpop(state->stack);
+        arg = value_real(&arg);
         shput(subroutine->local, arg_name, var_from_value(&arg));
         if (i == 0)
           break;
       }
     }
 
-    for (size_t i = 0; i < arrlenu(callee.data.func.instrs); ++i)
-      eval_instr(subroutine, callee.data.func.instrs[i]);
-
-    assert(arrlenu(subroutine->stack) == 1 &&
-           "Subroutine must result in exactly 1 value");
-
-    struct Value ret = arrpop(subroutine->stack);
-    arrpush(state->stack, ret);
-
-    program_free(subroutine);
-    value_drop(callee);
+    struct Value val = {.kind = ValThunk,
+                        .data.thunk = calloc(1, sizeof(struct ThunkValue)),
+                        .rc = malloc(sizeof(size_t))};
+    *val.rc = 1;
+    val.data.thunk->kind = ThunkFunc;
+    val.data.thunk->data.func.callee = callee;
+    val.data.thunk->data.func.state = subroutine;
+    arrpush(state->stack, val);
   } break;
   case CallCommand:
   case ApplyOp:
@@ -611,8 +698,10 @@ void eval_program(struct ProgramState *state, struct IRInstr *instrs,
   assert(arrlenu(state->stack) == 1 &&
          "Program must result in exactly 1 value");
 
-  char *s = value_as_string(state->stack[0]);
+  struct Value v = arrpop(state->stack);
+  char *s = value_as_string(v);
   printf(">> %s\n", s);
+  value_drop(v);
   arrfree(s);
 
   for (size_t i = 0; i < instrs_length; ++i)
