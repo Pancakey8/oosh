@@ -191,12 +191,13 @@ struct ThunkValue {
     struct {
       struct Value callee;
       struct ProgramState *state;
+      size_t pipe_to;
     } func;
 
     struct Value val;
 
     struct {
-      struct ThunkValue *from, *to;
+      struct Value *from, *to;
     } pipe;
   } data;
 };
@@ -540,7 +541,33 @@ void eval_thunk(struct ThunkValue *thunk) {
     // Already evaluated
   } break;
   case ThunkPipe: {
-    // TODO: Evaluate pipes
+    switch (thunk->data.pipe.to->data.thunk->kind) {
+    case ThunkProc: {
+      assert(false && "TODO: Handle process piping");
+    } break;
+    case ThunkFunc: {
+      struct Value from = value_real(thunk->data.pipe.from);
+
+      int arg_name_len = snprintf(
+          NULL, 0, "%zu", thunk->data.pipe.to->data.thunk->data.func.pipe_to);
+      char *arg_name = malloc(arg_name_len + 1);
+      snprintf(arg_name, arg_name_len + 1, "%zu",
+               thunk->data.pipe.to->data.thunk->data.func.pipe_to);
+      shput(thunk->data.pipe.to->data.thunk->data.func.state->local, arg_name,
+            var_from_value(&from));
+
+      struct Value val = value_real(thunk->data.pipe.to);
+      free(thunk->data.pipe.from);
+      free(thunk->data.pipe.to);
+
+      struct ThunkValue next = {.kind = ThunkVal, .data.val = val};
+      *thunk = next;
+    } break;
+    case ThunkVal:
+    case ThunkPipe:
+      assert(false && "TODO: Error handling, can't pipe to this");
+      break;
+    }
   } break;
   }
 }
@@ -548,7 +575,8 @@ void eval_thunk(struct ThunkValue *thunk) {
 struct Value value_real(struct Value *value) {
   struct Value mov = *value;
   *value = (struct Value){0};
-  if (mov.kind != ValThunk) return mov;
+  if (mov.kind != ValThunk)
+    return mov;
   eval_thunk(mov.data.thunk);
   struct Value res = value_shallowcpy(mov.data.thunk->data.val);
   value_drop(mov);
@@ -675,11 +703,43 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
     val.data.thunk->kind = ThunkFunc;
     val.data.thunk->data.func.callee = callee;
     val.data.thunk->data.func.state = subroutine;
+    val.data.thunk->data.func.pipe_to = instr.data.call_fn;
     arrpush(state->stack, val);
+  } break;
+  case PipeTo: {
+    assert(arrlenu(state->stack) >= 2);
+    struct Value rhs = arrpop(state->stack);
+    struct Value lhs = arrpop(state->stack);
+
+    if (rhs.kind != ValThunk)
+      assert(false && "TODO: Error handling, piping into non-thunk");
+
+    if (lhs.kind != ValThunk) {
+      struct Value thunk =
+          (struct Value){.kind = ValThunk,
+                         .data.thunk = calloc(1, sizeof(struct ThunkValue)),
+                         .rc = malloc(sizeof(size_t))};
+      *thunk.rc = 1;
+      thunk.data.thunk->kind = ThunkVal;
+      thunk.data.thunk->data.val = lhs;
+      lhs = thunk;
+    }
+
+    struct Value pipe =
+        (struct Value){.kind = ValThunk,
+                       .data.thunk = calloc(1, sizeof(struct ThunkValue)),
+                       .rc = malloc(sizeof(size_t))};
+    *pipe.rc = 1;
+    pipe.data.thunk->kind = ThunkPipe;
+    pipe.data.thunk->data.pipe.from = malloc(sizeof(struct Value));
+    *pipe.data.thunk->data.pipe.from = lhs;
+    pipe.data.thunk->data.pipe.to = malloc(sizeof(struct Value));
+    *pipe.data.thunk->data.pipe.to = rhs;
+
+    arrpush(state->stack, pipe);
   } break;
   case CallCommand:
   case ApplyOp:
-  case PipeTo:
     break;
   }
 }
