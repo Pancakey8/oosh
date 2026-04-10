@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
@@ -157,6 +160,56 @@ void instr_free(struct IRInstr instr) {
   }
 }
 
+char *stb(resolve_path)(const char *name) {
+  if (!name)
+    return NULL;
+
+  char *result = NULL;
+  char *path_env = getenv("PATH");
+
+  if (strchr(name, '/') != NULL) { // Has slash
+    if (access(name, X_OK) == 0) { // Executable
+      struct stat statbuf;
+      // Regular file / not directory
+      if (stat(name, &statbuf) == 0 && S_ISREG(statbuf.st_mode)) {
+        for (int i = 0; i <= strlen(name); i++) {
+          arrpush(result, name[i]);
+        }
+        return result;
+      }
+    }
+    return NULL;
+  }
+
+  if (!path_env)
+    return NULL;
+
+  char *path_copy = strdup(path_env);
+  char *save;
+  char *dir = strtok_r(path_copy, ":", &save);
+  char buf[1024];
+
+  while (dir != NULL) {
+    snprintf(buf, sizeof(buf), "%s/%s", dir, name); // In path
+
+    if (access(buf, X_OK) == 0) { // Executable
+      struct stat statbuf;
+      // Regular file / not directory
+      if (stat(buf, &statbuf) == 0 && S_ISREG(statbuf.st_mode)) {
+        for (int i = 0; i <= strlen(buf); i++) {
+          arrpush(result, buf[i]);
+        }
+        free(path_copy);
+        return result;
+      }
+    }
+    dir = strtok_r(NULL, ":", &save);
+  }
+
+  free(path_copy);
+  return NULL;
+}
+
 struct VarKV {
   char *key;
   struct Variable *value;
@@ -184,8 +237,8 @@ struct ThunkValue {
 
   union {
     struct {
-      char *name;
-      char **stb(args);
+      char *stb(name);
+      char *stb() * stb(args);
     } proc;
 
     struct {
@@ -516,7 +569,53 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr);
 void eval_thunk(struct ThunkValue *thunk) {
   switch (thunk->kind) {
   case ThunkProc: {
-    // TODO: Evaluate processes
+    int pipefd[2];
+    if (pipe(pipefd) < 0) {
+      assert(false && "TODO: Error handling, pipe failed");
+    }
+
+    pid_t proc = fork();
+    if (proc < 0)
+      assert(false && "TODO: Error handling, fork failed");
+
+    if (proc == 0) {
+      setpgid(0, 0);
+
+      dup2(pipefd[1], STDOUT_FILENO);
+      close(pipefd[0]);
+      close(pipefd[1]);
+
+      execv(thunk->data.proc.name, thunk->data.proc.args);
+    } else {
+      close(pipefd[1]);
+
+      char *stb(output) = NULL;
+      char buffer[4096];
+      ssize_t bytes_read;
+
+      while ((bytes_read = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
+        size_t len = arrlenu(output);
+        arraddnindex(output, bytes_read);
+        memcpy(output + len, buffer, bytes_read);
+      }
+
+      arrpush(output, '\0');
+
+      close(pipefd[0]);
+      int status;
+      waitpid(proc, &status, 0);
+
+      struct Value str = value_str(output);
+      arrfree(output);
+      struct ThunkValue next = {.kind = ThunkVal, .data.val = str};
+
+      arrfree(thunk->data.proc.name);
+      for (size_t i = 0; i < arrlen(thunk->data.proc.args); ++i) {
+        arrfree(thunk->data.proc.args[i]);
+      }
+      arrfree(thunk->data.proc.args);
+      *thunk = next;
+    }
   } break;
   case ThunkFunc: {
     assert(thunk->data.func.callee.kind == ValFunc &&
@@ -738,7 +837,42 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
 
     arrpush(state->stack, pipe);
   } break;
-  case CallCommand:
+  case CallCommand: {
+    assert(arrlenu(state->stack) >= instr.data.call_cmd + 1);
+    struct Value command = arrpop(state->stack);
+
+    struct ThunkValue cmd = {.kind = ThunkProc, .data.proc = {0}};
+
+    char *name = value_as_string(command);
+    cmd.data.proc.name = resolve_path(name);
+    arrfree(name);
+
+    if (!cmd.data.proc.name)
+      assert(false && "TODO: Error handling, invalid path");
+
+    cmd.data.proc.args = NULL;
+    arrsetlen(cmd.data.proc.args, instr.data.call_cmd + 2);
+    for (size_t i = instr.data.call_cmd; i > 0; --i) {
+      struct Value arg = arrpop(state->stack);
+      cmd.data.proc.args[i] = value_as_string(arg);
+      value_drop(arg);
+    }
+    cmd.data.proc.args[0] = NULL;
+    arrsetlen(cmd.data.proc.args[0], arrlenu(cmd.data.proc.name));
+    memcpy(cmd.data.proc.args[0], cmd.data.proc.name,
+           arrlenu(cmd.data.proc.name));
+    cmd.data.proc.args[instr.data.call_cmd + 1] = NULL;
+
+    struct Value proc = {.kind = ValThunk,
+                         .data.thunk = calloc(1, sizeof(struct ThunkValue)),
+                         .rc = malloc(sizeof(size_t))};
+    *proc.rc = 1;
+    *proc.data.thunk = cmd;
+
+    arrput(state->stack, proc);
+
+    value_drop(command);
+  } break;
   case ApplyOp:
     break;
   }
