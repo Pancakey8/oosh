@@ -6,10 +6,15 @@ import Control.Monad.IO.Class
 import Syntax
 import Text.Parsec
 import IR
+import System.Environment
+import System.FilePath
 
 main :: IO ()
 main = do
   state <- initProgram
+  exe <- getExecutablePath
+  let exeDir = takeDirectory exe
+  programImport state (exeDir </> "std.so")
   runInputT defaultSettings (loop state ""  False)
   where
     run :: ProgramStatePtr -> String -> IO ()

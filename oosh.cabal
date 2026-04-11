@@ -78,12 +78,15 @@ executable oosh
     build-depends:    base ^>=4.21.0.0,
                       haskeline,
                       parsec,
-                      mtl
+                      mtl,
+                      filepath
 
     -- Directories containing source files.
     hs-source-dirs:   app
 
     c-sources:        csrc/wrapper.c
+
+    ld-options: -rdynamic
 
     if flag(debug)
         cc-options:       -g -O0 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer

@@ -1,5 +1,6 @@
 #include "wrapper.h"
 #include <assert.h>
+#include <dlfcn.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -160,44 +161,6 @@ void instr_free(struct IRInstr instr) {
   }
 }
 
-struct Job {
-  pid_t pgid;
-  size_t jobid;
-  struct Job *next;
-};
-
-static struct Job *jobs = NULL;
-static size_t next_job = 0;
-
-size_t job_add(pid_t pgid) {
-  struct Job *job = malloc(sizeof(*job));
-  job->pgid = pgid;
-  job->jobid = next_job++;
-  job->next = jobs;
-  jobs = job;
-  return job->jobid;
-}
-
-struct Job *job_pop(size_t jobid) {
-  for (struct Job **job = &jobs; job; job = &(*job)->next) {
-    if ((*job)->jobid == jobid) {
-      struct Job *this = *job;
-      *job = (*job)->next;
-      return *job;
-    }
-  }
-
-  return NULL;
-}
-
-struct Job *job_find(size_t jobid) {
-  for (struct Job *job = jobs; job; job = job->next) {
-    if (job->jobid == jobid)
-      return job;
-  }
-  return NULL;
-}
-
 char *stb(resolve_path)(const char *name) {
   if (!name)
     return NULL;
@@ -210,7 +173,7 @@ char *stb(resolve_path)(const char *name) {
       struct stat statbuf;
       // Regular file / not directory
       if (stat(name, &statbuf) == 0 && S_ISREG(statbuf.st_mode)) {
-        for (int i = 0; i <= strlen(name); i++) {
+        for (size_t i = 0; i <= strlen(name); i++) {
           arrpush(result, name[i]);
         }
         return result;
@@ -234,7 +197,7 @@ char *stb(resolve_path)(const char *name) {
       struct stat statbuf;
       // Regular file / not directory
       if (stat(buf, &statbuf) == 0 && S_ISREG(statbuf.st_mode)) {
-        for (int i = 0; i <= strlen(buf); i++) {
+        for (size_t i = 0; i <= strlen(buf); i++) {
           arrpush(result, buf[i]);
         }
         free(path_copy);
@@ -251,23 +214,6 @@ char *stb(resolve_path)(const char *name) {
 struct VarKV {
   char *key;
   struct Variable *value;
-};
-
-struct Value {
-  enum ValueKind { ValNum, ValStr, ValFunc, ValArray, ValVoid, ValThunk } kind;
-
-  union {
-    double num;
-    char *stb(str);
-    struct Value *stb(array);
-    struct {
-      struct IRInstr *stb(instrs);
-      struct VarKV *stb(captures);
-    } func;
-    struct ThunkValue *thunk;
-  } data;
-
-  size_t *rc;
 };
 
 struct ThunkValue {
@@ -311,13 +257,13 @@ struct Variable *var_keep(struct Variable *var) {
   return var;
 }
 
-void var_drop(struct Variable *var) {
+void var_drop(struct ProgramState *state, struct Variable *var) {
   if (var->rc > 1) {
     --var->rc;
     return;
   }
 
-  value_drop(var->value);
+  value_drop(state, var->value);
   free(var);
 }
 
@@ -336,15 +282,24 @@ struct Value value_str(char const *str) {
 }
 
 struct Value value_func(struct IRInstr const *instrs, size_t instrs_length) {
-  struct Value val =
-      (struct Value){.kind = ValFunc,
-                     .data.func = {.instrs = NULL, .captures = NULL},
-                     .rc = malloc(sizeof(size_t))};
+  struct Value val = (struct Value){
+      .kind = ValFunc,
+      .data.func = {.is_internal = false, .instrs = NULL, .captures = NULL},
+      .rc = malloc(sizeof(size_t))};
   *val.rc = 1;
   arrsetlen(val.data.func.instrs, instrs_length);
   for (size_t i = 0; i < instrs_length; ++i) {
     val.data.func.instrs[i] = instr_copy(instrs[i]);
   }
+  return val;
+}
+
+struct Value value_funcint(internal_function_type fptr) {
+  struct Value val =
+      (struct Value){.kind = ValFunc,
+                     .data.func = {.is_internal = true, .internal = fptr},
+                     .rc = malloc(sizeof(size_t))};
+  *val.rc = 1;
   return val;
 }
 
@@ -387,15 +342,17 @@ struct Value value_own(struct Value val) {
   } break;
 
   case ValFunc: {
-    owned.data.func.instrs = NULL;
-    arrsetlen(owned.data.func.instrs, arrlenu(val.data.func.instrs));
-    for (size_t i = 0; i < arrlenu(val.data.func.instrs); ++i) {
-      owned.data.func.instrs[i] = instr_copy(val.data.func.instrs[i]);
-    }
-    owned.data.func.captures = NULL;
-    for (size_t i = 0; i < shlenu(val.data.func.captures); ++i) {
-      shput(owned.data.func.captures, strdup(val.data.func.captures[i].key),
-            var_keep(val.data.func.captures[i].value));
+    if (!val.data.func.is_internal) {
+      owned.data.func.instrs = NULL;
+      arrsetlen(owned.data.func.instrs, arrlenu(val.data.func.instrs));
+      for (size_t i = 0; i < arrlenu(val.data.func.instrs); ++i) {
+        owned.data.func.instrs[i] = instr_copy(val.data.func.instrs[i]);
+      }
+      owned.data.func.captures = NULL;
+      for (size_t i = 0; i < shlenu(val.data.func.captures); ++i) {
+        shput(owned.data.func.captures, strdup(val.data.func.captures[i].key),
+              var_keep(val.data.func.captures[i].value));
+      }
     }
   } break;
 
@@ -416,10 +373,11 @@ struct Value value_own(struct Value val) {
   return owned;
 }
 
-void eval_thunk(struct ThunkValue *thunk, bool is_termctl);
-struct Value value_real(struct Value *value);
+void eval_thunk(struct ProgramState *state, struct ThunkValue *thunk,
+                bool is_termctl);
+struct Value value_real(struct ProgramState *state, struct Value *value);
 
-void value_drop(struct Value val) {
+void value_drop(struct ProgramState *state, struct Value val) {
   if (val.kind == ValVoid || val.kind == ValNum)
     return;
   if (*val.rc > 1) {
@@ -434,26 +392,28 @@ void value_drop(struct Value val) {
   } break;
 
   case ValFunc: {
-    for (size_t i = 0; i < arrlenu(val.data.func.instrs); ++i)
-      instr_free(val.data.func.instrs[i]);
-    arrfree(val.data.func.instrs);
-    for (size_t i = 0; i < shlenu(val.data.func.captures); ++i) {
-      free(val.data.func.captures[i].key);
-      var_drop(val.data.func.captures[i].value);
+    if (!val.data.func.is_internal) {
+      for (size_t i = 0; i < arrlenu(val.data.func.instrs); ++i)
+        instr_free(val.data.func.instrs[i]);
+      arrfree(val.data.func.instrs);
+      for (size_t i = 0; i < shlenu(val.data.func.captures); ++i) {
+        free(val.data.func.captures[i].key);
+        var_drop(state, val.data.func.captures[i].value);
+      }
+      shfree(val.data.func.captures);
     }
-    shfree(val.data.func.captures);
   } break;
 
   case ValArray: {
     for (size_t i = 0; i < arrlenu(val.data.array); ++i) {
-      value_drop(val.data.array[i]);
+      value_drop(state, val.data.array[i]);
     }
     arrfree(val.data.array);
   } break;
 
   case ValThunk: {
-    eval_thunk(val.data.thunk, true);
-    value_drop(val.data.thunk->data.val);
+    eval_thunk(state, val.data.thunk, true);
+    value_drop(state, val.data.thunk->data.val);
     free(val.data.thunk);
   } break;
 
@@ -464,7 +424,7 @@ void value_drop(struct Value val) {
   }
 }
 
-char *stb(value_as_string)(struct Value val) {
+char *stb(value_as_string)(struct ProgramState *state, struct Value val) {
   switch (val.kind) {
   case ValNum: {
     int n = snprintf(NULL, 0, "%lf", val.data.num);
@@ -492,7 +452,7 @@ char *stb(value_as_string)(struct Value val) {
     arrput(str, ' ');
 
     for (size_t i = 0; i < arrlenu(val.data.array); i++) {
-      char *element_str = value_as_string(val.data.array[i]);
+      char *element_str = value_as_string(state, val.data.array[i]);
 
       if (i > 0) {
         arrput(str, ',');
@@ -515,9 +475,9 @@ char *stb(value_as_string)(struct Value val) {
   } break;
   case ValThunk: {
     struct Value cpy = value_shallowcpy(val);
-    cpy = value_real(&cpy);
-    char *s = value_as_string(cpy);
-    value_drop(cpy);
+    cpy = value_real(state, &cpy);
+    char *s = value_as_string(state, cpy);
+    value_drop(state, cpy);
     return s;
   } break;
   case ValVoid: {
@@ -535,11 +495,30 @@ struct ProgramState {
 
   // Evaluation stack
   struct Value *stb(stack);
+
+  // Process jobs
+  struct Job *jobs;
+  size_t *next_job;
 };
 
-struct ProgramState *init_program() {
+struct ProgramState *init_program(void) {
   struct ProgramState *state = calloc(1, sizeof(typeof(*state)));
+  state->next_job = malloc(sizeof(size_t));
+  *state->next_job = 0;
   return state;
+}
+
+struct Value program_var(struct ProgramState *state, char *name) {
+  ptrdiff_t index;
+  if ((index = shgeti(state->local, name)) >= 0) {
+    return value_shallowcpy(state->local[index].value->value);
+  }
+
+  if ((index = shgeti(state->global, name)) >= 0) {
+    return value_shallowcpy(state->global[index].value->value);
+  }
+
+  return value_void();
 }
 
 void program_free(struct ProgramState *state) {
@@ -548,14 +527,14 @@ void program_free(struct ProgramState *state) {
 
   if (state->stack) {
     for (size_t i = 0; i < arrlenu(state->stack); ++i)
-      value_drop(state->stack[i]);
+      value_drop(state, state->stack[i]);
     arrfree(state->stack);
   }
 
   if (state->local) {
     for (size_t i = 0; i < shlenu(state->local); ++i) {
       free(state->local[i].key);
-      var_drop(state->local[i].value);
+      var_drop(state, state->local[i].value);
     }
     shfree(state->local);
   }
@@ -563,13 +542,57 @@ void program_free(struct ProgramState *state) {
   if (state->global) {
     for (size_t i = 0; i < shlenu(state->global); ++i) {
       free(state->global[i].key);
-      var_drop(state->global[i].value);
+      var_drop(state, state->global[i].value);
     }
     shfree(state->global);
   }
 
+  // TOOD: How do we free jobs? They must finish first. We also don't wanna free
+  // in functions
+
   free(state);
 }
+
+void program_import(struct ProgramState *state, char *so_path) {
+  void *handle = dlopen(so_path, RTLD_NOW | RTLD_GLOBAL);
+  module_entry_type entry = dlsym(handle, "oosh_entry");
+  struct ModuleEntry module = entry();
+  for (size_t i = 0; i < module.function_count; ++i) {
+    struct Value fn = value_funcint(module.functions[i].function);
+    shput(state->global, strdup(module.functions[i].name), var_from_value(&fn));
+  }
+}
+
+size_t job_add(struct ProgramState *state, pid_t pgid) {
+  struct Job *job = malloc(sizeof(*job));
+  job->pgid = pgid;
+  job->jobid = (*state->next_job)++;
+  job->next = state->jobs;
+  state->jobs = job;
+  return job->jobid;
+}
+
+struct Job *job_pop(struct ProgramState *state, size_t jobid) {
+  for (struct Job **job = &state->jobs; job; job = &(*job)->next) {
+    if ((*job)->jobid == jobid) {
+      struct Job *this = *job;
+      *job = (*job)->next;
+      return *job;
+    }
+  }
+
+  return NULL;
+}
+
+struct Job *job_find(struct ProgramState *state, size_t jobid) {
+  for (struct Job *job = state->jobs; job; job = job->next) {
+    if (job->jobid == jobid)
+      return job;
+  }
+  return NULL;
+}
+
+struct Job *job_begin(struct ProgramState *state) { return state->jobs; }
 
 char *stb(eval_tmps)(struct ProgramState *state, struct TemplatePart *parts,
                      size_t parts_length) {
@@ -590,7 +613,7 @@ char *stb(eval_tmps)(struct ProgramState *state, struct TemplatePart *parts,
           assert(false && "TODO: Error handling, variable not defined");
         }
       }
-      char *s = value_as_string(kv->value->value);
+      char *s = value_as_string(state, kv->value->value);
       size_t len = arrlenu(res) - 1;
       size_t s_len = arrlenu(s) - 1;
       arrsetlen(res, len + s_len + 1);
@@ -604,7 +627,10 @@ char *stb(eval_tmps)(struct ProgramState *state, struct TemplatePart *parts,
 
 void eval_instr(struct ProgramState *state, struct IRInstr instr);
 
-void run_proc(char *stb(name), char *stb() * stb(argv)) {
+void run_proc(struct ProgramState *state, char *stb(name),
+              char *stb() * stb(argv)) {
+  signal(SIGTTOU, SIG_IGN);
+  signal(SIGTTIN, SIG_IGN);
   pid_t proc = fork();
 
   if (proc < 0)
@@ -612,12 +638,22 @@ void run_proc(char *stb(name), char *stb() * stb(argv)) {
 
   if (proc == 0) {
     setpgid(0, 0);
+    tcsetpgrp(STDIN_FILENO, getpgrp());
+    signal(SIGTTOU, SIG_DFL);
+    signal(SIGTTIN, SIG_DFL);
     execv(name, argv);
     exit(1);
   } else {
     setpgid(proc, proc);
     int status;
-    waitpid(proc, &status, 0);
+    waitpid(proc, &status, WUNTRACED);
+    if (WIFSTOPPED(status)) {
+      size_t jid = job_add(state, proc);
+      printf("OOSH: Job %zu suspended\n", jid);
+    }
+    tcsetpgrp(STDIN_FILENO, getpgrp());
+    signal(SIGTTOU, SIG_DFL);
+    signal(SIGTTIN, SIG_DFL);
   }
 }
 
@@ -664,13 +700,14 @@ char *stb(read_proc)(char *stb(name), char *stb() * stb(argv)) {
   }
 }
 
-void eval_thunk(struct ThunkValue *thunk, bool is_termctl) {
+void eval_thunk(struct ProgramState *state, struct ThunkValue *thunk,
+                bool is_termctl) {
   switch (thunk->kind) {
   case ThunkProc: {
     struct ThunkValue next;
 
     if (is_termctl) {
-      run_proc(thunk->data.proc.name, thunk->data.proc.args);
+      run_proc(state, thunk->data.proc.name, thunk->data.proc.args);
       next = (struct ThunkValue){.kind = ThunkVal, .data.val = value_void()};
     } else {
       char *str = read_proc(thunk->data.proc.name, thunk->data.proc.args);
@@ -689,19 +726,24 @@ void eval_thunk(struct ThunkValue *thunk, bool is_termctl) {
   case ThunkFunc: {
     assert(thunk->data.func.callee.kind == ValFunc &&
            "Thunk can't store non-function callee");
-    for (size_t i = 0; i < arrlenu(thunk->data.func.callee.data.func.instrs);
-         ++i) {
-      eval_instr(thunk->data.func.state,
-                 thunk->data.func.callee.data.func.instrs[i]);
+    struct Value res;
+    if (thunk->data.func.callee.data.func.is_internal) {
+      res = thunk->data.func.callee.data.func.internal(thunk->data.func.state);
+    } else {
+      for (size_t i = 0; i < arrlenu(thunk->data.func.callee.data.func.instrs);
+           ++i) {
+        eval_instr(thunk->data.func.state,
+                   thunk->data.func.callee.data.func.instrs[i]);
+      }
+
+      assert(arrlenu(thunk->data.func.state->stack) == 1 &&
+             "Function must result in one value");
+      res = arrpop(thunk->data.func.state->stack);
     }
 
-    assert(arrlenu(thunk->data.func.state->stack) == 1 &&
-           "Function must result in one value");
-    struct Value res = arrpop(thunk->data.func.state->stack);
     struct ThunkValue next = {.kind = ThunkVal, .data.val = res};
-
     program_free(thunk->data.func.state);
-    value_drop(thunk->data.func.callee);
+    value_drop(state, thunk->data.func.callee);
 
     *thunk = next;
   } break;
@@ -714,7 +756,7 @@ void eval_thunk(struct ThunkValue *thunk, bool is_termctl) {
       assert(false && "TODO: Handle process piping");
     } break;
     case ThunkFunc: {
-      struct Value from = value_real(thunk->data.pipe.from);
+      struct Value from = value_real(state, thunk->data.pipe.from);
 
       int arg_name_len = snprintf(
           NULL, 0, "%zu", thunk->data.pipe.to->data.thunk->data.func.pipe_to);
@@ -724,7 +766,7 @@ void eval_thunk(struct ThunkValue *thunk, bool is_termctl) {
       shput(thunk->data.pipe.to->data.thunk->data.func.state->local, arg_name,
             var_from_value(&from));
 
-      struct Value val = value_real(thunk->data.pipe.to);
+      struct Value val = value_real(state, thunk->data.pipe.to);
       free(thunk->data.pipe.from);
       free(thunk->data.pipe.to);
 
@@ -740,14 +782,14 @@ void eval_thunk(struct ThunkValue *thunk, bool is_termctl) {
   }
 }
 
-struct Value value_real(struct Value *value) {
+struct Value value_real(struct ProgramState *state, struct Value *value) {
   struct Value mov = *value;
   *value = (struct Value){0};
   if (mov.kind != ValThunk)
     return mov;
-  eval_thunk(mov.data.thunk, false);
+  eval_thunk(state, mov.data.thunk, false);
   struct Value res = value_shallowcpy(mov.data.thunk->data.val);
-  value_drop(mov);
+  value_drop(state, mov);
   return res;
 }
 
@@ -772,14 +814,14 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
     if (n != 0) {
       for (size_t i = n - 1;; --i) {
         struct Value v = arrpop(state->stack);
-        vals[i] = value_real(&v);
+        vals[i] = value_real(state, &v);
         if (i == 0)
           break;
       }
     }
     arrpush(state->stack, value_array(vals, n));
     for (size_t i = 0; i < n; ++i)
-      value_drop(vals[i]);
+      value_drop(state, vals[i]);
     free(vals);
   } break;
   case PushFn: { // TODO: This might be fragile
@@ -814,9 +856,9 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
         assert(false && "TODO: Error handling, variable not defined");
       }
     }
-    value_drop(kv->value->value);
+    value_drop(state, kv->value->value);
     struct Value v = arrpop(state->stack);
-    kv->value->value = value_real(&v);
+    kv->value->value = value_real(state, &v);
     arrpush(state->stack, value_void());
   } break;
   case DefineVar: {
@@ -826,18 +868,18 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
              "TODO: Error handling, attempt to redefine existing variable");
     }
     struct Value v = arrpop(state->stack);
-    v = value_real(&v);
+    v = value_real(state, &v);
     shput(state->local, strdup(instr.data.define), var_from_value(&v));
     arrpush(state->stack, value_void());
   } break;
   case Drop: {
     struct Value v = arrpop(state->stack);
-    value_drop(v);
+    value_drop(state, v);
   } break;
   case CallFunction: {
     assert(arrlenu(state->stack) >= instr.data.call_fn + 1);
     struct Value callee = arrpop(state->stack);
-    callee = value_real(&callee);
+    callee = value_real(state, &callee);
 
     if (callee.kind != ValFunc) {
       assert(false && "TODO: Error handling, calling non-function value");
@@ -846,9 +888,11 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
     struct ProgramState *subroutine = init_program();
 
     // TODO: This might be fragile
-    for (size_t i = 0; i < shlenu(callee.data.func.captures); ++i) {
-      struct VarKV kv = callee.data.func.captures[i];
-      shput(subroutine->global, strdup(kv.key), var_keep(kv.value));
+    if (!callee.data.func.is_internal) {
+      for (size_t i = 0; i < shlenu(callee.data.func.captures); ++i) {
+        struct VarKV kv = callee.data.func.captures[i];
+        shput(subroutine->global, strdup(kv.key), var_keep(kv.value));
+      }
     }
 
     if (instr.data.call_fn != 0) {
@@ -857,12 +901,16 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
         char *arg_name = malloc(arg_name_len + 1);
         snprintf(arg_name, arg_name_len + 1, "%zu", i);
         struct Value arg = arrpop(state->stack);
-        arg = value_real(&arg);
+        arg = value_real(state, &arg);
         shput(subroutine->local, arg_name, var_from_value(&arg));
         if (i == 0)
           break;
       }
     }
+
+    subroutine->jobs = state->jobs;
+    free(subroutine->next_job);
+    subroutine->next_job = state->next_job;
 
     struct Value val = {.kind = ValThunk,
                         .data.thunk = calloc(1, sizeof(struct ThunkValue)),
@@ -912,7 +960,7 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
 
     struct ThunkValue cmd = {.kind = ThunkProc, .data.proc = {0}};
 
-    char *name = value_as_string(command);
+    char *name = value_as_string(state, command);
     cmd.data.proc.name = resolve_path(name);
     arrfree(name);
 
@@ -923,8 +971,8 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
     arrsetlen(cmd.data.proc.args, instr.data.call_cmd + 2);
     for (size_t i = instr.data.call_cmd; i > 0; --i) {
       struct Value arg = arrpop(state->stack);
-      cmd.data.proc.args[i] = value_as_string(arg);
-      value_drop(arg);
+      cmd.data.proc.args[i] = value_as_string(state, arg);
+      value_drop(state, arg);
     }
     cmd.data.proc.args[0] = NULL;
     arrsetlen(cmd.data.proc.args[0], arrlenu(cmd.data.proc.name));
@@ -940,7 +988,7 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
 
     arrput(state->stack, proc);
 
-    value_drop(command);
+    value_drop(state, command);
   } break;
   case ApplyOp:
     break;
@@ -950,7 +998,7 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
 void eval_program(struct ProgramState *state, struct IRInstr *instrs,
                   size_t instrs_length) {
   for (size_t i = 0; i < arrlenu(state->stack); ++i) {
-    value_drop(state->stack[i]);
+    value_drop(state, state->stack[i]);
   }
   arrfree(state->stack);
   state->stack = NULL; // Clearing stack to be safe
@@ -963,10 +1011,10 @@ void eval_program(struct ProgramState *state, struct IRInstr *instrs,
 
   struct Value v = arrpop(state->stack);
   if (v.kind == ValThunk)
-    eval_thunk(v.data.thunk, true);
-  char *s = value_as_string(v);
+    eval_thunk(state, v.data.thunk, true);
+  char *s = value_as_string(state, v);
   printf(">> %s\n", s);
-  value_drop(v);
+  value_drop(state, v);
   arrfree(s);
 
   for (size_t i = 0; i < instrs_length; ++i)
