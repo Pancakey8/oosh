@@ -160,6 +160,44 @@ void instr_free(struct IRInstr instr) {
   }
 }
 
+struct Job {
+  pid_t pgid;
+  size_t jobid;
+  struct Job *next;
+};
+
+static struct Job *jobs = NULL;
+static size_t next_job = 0;
+
+size_t job_add(pid_t pgid) {
+  struct Job *job = malloc(sizeof(*job));
+  job->pgid = pgid;
+  job->jobid = next_job++;
+  job->next = jobs;
+  jobs = job;
+  return job->jobid;
+}
+
+struct Job *job_pop(size_t jobid) {
+  for (struct Job **job = &jobs; job; job = &(*job)->next) {
+    if ((*job)->jobid == jobid) {
+      struct Job *this = *job;
+      *job = (*job)->next;
+      return *job;
+    }
+  }
+
+  return NULL;
+}
+
+struct Job *job_find(size_t jobid) {
+  for (struct Job *job = jobs; job; job = job->next) {
+    if (job->jobid == jobid)
+      return job;
+  }
+  return NULL;
+}
+
 char *stb(resolve_path)(const char *name) {
   if (!name)
     return NULL;
@@ -378,7 +416,7 @@ struct Value value_own(struct Value val) {
   return owned;
 }
 
-void eval_thunk(struct ThunkValue *thunk);
+void eval_thunk(struct ThunkValue *thunk, bool is_termctl);
 struct Value value_real(struct Value *value);
 
 void value_drop(struct Value val) {
@@ -414,7 +452,7 @@ void value_drop(struct Value val) {
   } break;
 
   case ValThunk: {
-    eval_thunk(val.data.thunk);
+    eval_thunk(val.data.thunk, true);
     value_drop(val.data.thunk->data.val);
     free(val.data.thunk);
   } break;
@@ -566,56 +604,87 @@ char *stb(eval_tmps)(struct ProgramState *state, struct TemplatePart *parts,
 
 void eval_instr(struct ProgramState *state, struct IRInstr instr);
 
-void eval_thunk(struct ThunkValue *thunk) {
+void run_proc(char *stb(name), char *stb() * stb(argv)) {
+  pid_t proc = fork();
+
+  if (proc < 0)
+    assert(false && "TODO: Error handling, fork failed");
+
+  if (proc == 0) {
+    setpgid(0, 0);
+    execv(name, argv);
+    exit(1);
+  } else {
+    setpgid(proc, proc);
+    int status;
+    waitpid(proc, &status, 0);
+  }
+}
+
+char *stb(read_proc)(char *stb(name), char *stb() * stb(argv)) {
+  int pipefd[2];
+  if (pipe(pipefd) < 0) {
+    assert(false && "TODO: Error handling, pipe failed");
+  }
+
+  pid_t proc = fork();
+  if (proc < 0)
+    assert(false && "TODO: Error handling, fork failed");
+
+  if (proc == 0) {
+    setpgid(0, 0);
+
+    dup2(pipefd[1], STDOUT_FILENO);
+    close(pipefd[0]);
+    close(pipefd[1]);
+
+    execv(name, argv);
+    exit(1);
+  } else {
+    setpgid(proc, proc);
+    close(pipefd[1]);
+
+    char *stb(output) = NULL;
+    char buffer[4096];
+    ssize_t bytes_read;
+
+    while ((bytes_read = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
+      size_t len = arrlenu(output);
+      arraddnindex(output, bytes_read);
+      memcpy(output + len, buffer, bytes_read);
+    }
+
+    arrpush(output, '\0');
+
+    close(pipefd[0]);
+    int status;
+    waitpid(proc, &status, 0);
+
+    return output;
+  }
+}
+
+void eval_thunk(struct ThunkValue *thunk, bool is_termctl) {
   switch (thunk->kind) {
   case ThunkProc: {
-    int pipefd[2];
-    if (pipe(pipefd) < 0) {
-      assert(false && "TODO: Error handling, pipe failed");
-    }
+    struct ThunkValue next;
 
-    pid_t proc = fork();
-    if (proc < 0)
-      assert(false && "TODO: Error handling, fork failed");
-
-    if (proc == 0) {
-      setpgid(0, 0);
-
-      dup2(pipefd[1], STDOUT_FILENO);
-      close(pipefd[0]);
-      close(pipefd[1]);
-
-      execv(thunk->data.proc.name, thunk->data.proc.args);
+    if (is_termctl) {
+      run_proc(thunk->data.proc.name, thunk->data.proc.args);
+      next = (struct ThunkValue){.kind = ThunkVal, .data.val = value_void()};
     } else {
-      close(pipefd[1]);
-
-      char *stb(output) = NULL;
-      char buffer[4096];
-      ssize_t bytes_read;
-
-      while ((bytes_read = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
-        size_t len = arrlenu(output);
-        arraddnindex(output, bytes_read);
-        memcpy(output + len, buffer, bytes_read);
-      }
-
-      arrpush(output, '\0');
-
-      close(pipefd[0]);
-      int status;
-      waitpid(proc, &status, 0);
-
-      struct Value str = value_str(output);
-      arrfree(output);
-      struct ThunkValue next = {.kind = ThunkVal, .data.val = str};
-
-      arrfree(thunk->data.proc.name);
-      for (size_t i = 0; i < arrlen(thunk->data.proc.args); ++i) {
-        arrfree(thunk->data.proc.args[i]);
-      }
-      arrfree(thunk->data.proc.args);
-      *thunk = next;
+      char *str = read_proc(thunk->data.proc.name, thunk->data.proc.args);
+      struct Value val = value_str(str);
+      arrfree(str);
+      next = (struct ThunkValue){.kind = ThunkVal, .data.val = val};
     }
+
+    arrfree(thunk->data.proc.name);
+    for (size_t i = 0; i < arrlenu(thunk->data.proc.args); ++i)
+      arrfree(thunk->data.proc.args[i]);
+    arrfree(thunk->data.proc.args);
+
+    *thunk = next;
   } break;
   case ThunkFunc: {
     assert(thunk->data.func.callee.kind == ValFunc &&
@@ -676,7 +745,7 @@ struct Value value_real(struct Value *value) {
   *value = (struct Value){0};
   if (mov.kind != ValThunk)
     return mov;
-  eval_thunk(mov.data.thunk);
+  eval_thunk(mov.data.thunk, false);
   struct Value res = value_shallowcpy(mov.data.thunk->data.val);
   value_drop(mov);
   return res;
@@ -893,6 +962,8 @@ void eval_program(struct ProgramState *state, struct IRInstr *instrs,
          "Program must result in exactly 1 value");
 
   struct Value v = arrpop(state->stack);
+  if (v.kind == ValThunk)
+    eval_thunk(v.data.thunk, true);
   char *s = value_as_string(v);
   printf(">> %s\n", s);
   value_drop(v);
