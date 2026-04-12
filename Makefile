@@ -1,4 +1,4 @@
-CFLAGS = -fPIC -shared -Wall -Wextra
+CFLAGS = -std=gnu23 -fPIC -shared -Wall -Wextra
 ifdef DEBUG
     CFLAGS += -g3 -O0 -fsanitize=address,undefined
 else

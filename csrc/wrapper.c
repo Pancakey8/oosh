@@ -1,6 +1,7 @@
 #include "wrapper.h"
 #include <assert.h>
 #include <dlfcn.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -704,28 +705,56 @@ char *stb(read_proc)(char *stb(name), char *stb() * stb(argv)) {
   }
 }
 
+void thunk_free(struct ProgramState *state, struct ThunkValue thunk) {
+  switch (thunk.kind) {
+  case ThunkProc: {
+    arrfree(thunk.data.proc.name);
+    for (size_t i = 0; i < arrlenu(thunk.data.proc.args); ++i)
+      arrfree(thunk.data.proc.args[i]);
+    arrfree(thunk.data.proc.args);
+  } break;
+  case ThunkFunc: {
+    value_drop(state, thunk.data.func.callee);
+    program_free(thunk.data.func.state);
+  } break;
+  case ThunkVal: {
+    // Nothing to clean
+  } break;
+  case ThunkPipe: {
+    if (thunk.data.pipe.from) {
+      if (thunk.data.pipe.from->data.thunk)
+        thunk_free(state, *thunk.data.pipe.from->data.thunk);
+      free(thunk.data.pipe.from->data.thunk);
+      free(thunk.data.pipe.from->rc);
+      free(thunk.data.pipe.from);
+    }
+
+    if (thunk.data.pipe.to) {
+      if (thunk.data.pipe.to->data.thunk)
+        thunk_free(state, *thunk.data.pipe.to->data.thunk);
+      free(thunk.data.pipe.to->data.thunk);
+      free(thunk.data.pipe.to->rc);
+      free(thunk.data.pipe.to);
+    }
+  } break;
+  }
+}
+
 void eval_thunk(struct ProgramState *state, struct ThunkValue *thunk,
                 bool is_termctl) {
+  struct ThunkValue old = *thunk;
+
   switch (thunk->kind) {
   case ThunkProc: {
-    struct ThunkValue next;
-
     if (is_termctl) {
       run_proc(state, thunk->data.proc.name, thunk->data.proc.args);
-      next = (struct ThunkValue){.kind = ThunkVal, .data.val = value_void()};
+      *thunk = (struct ThunkValue){.kind = ThunkVal, .data.val = value_void()};
     } else {
       char *str = read_proc(thunk->data.proc.name, thunk->data.proc.args);
       struct Value val = value_str(str);
       arrfree(str);
-      next = (struct ThunkValue){.kind = ThunkVal, .data.val = val};
+      *thunk = (struct ThunkValue){.kind = ThunkVal, .data.val = val};
     }
-
-    arrfree(thunk->data.proc.name);
-    for (size_t i = 0; i < arrlenu(thunk->data.proc.args); ++i)
-      arrfree(thunk->data.proc.args[i]);
-    arrfree(thunk->data.proc.args);
-
-    *thunk = next;
   } break;
   case ThunkFunc: {
     assert(thunk->data.func.callee.kind == ValFunc &&
@@ -745,11 +774,7 @@ void eval_thunk(struct ProgramState *state, struct ThunkValue *thunk,
       res = arrpop(thunk->data.func.state->stack);
     }
 
-    struct ThunkValue next = {.kind = ThunkVal, .data.val = res};
-    program_free(thunk->data.func.state);
-    value_drop(state, thunk->data.func.callee);
-
-    *thunk = next;
+    *thunk = (struct ThunkValue){.kind = ThunkVal, .data.val = res};
   } break;
   case ThunkVal: {
     // Already evaluated
@@ -757,7 +782,141 @@ void eval_thunk(struct ProgramState *state, struct ThunkValue *thunk,
   case ThunkPipe: {
     switch (thunk->data.pipe.to->data.thunk->kind) {
     case ThunkProc: {
-      assert(false && "TODO: Handle process piping");
+      struct {
+        char *name;
+        char **argv;
+      } *processes = NULL;
+      struct Value *left_value = NULL;
+
+      auto left = thunk;
+      while (left->data.pipe.to->data.thunk->kind == ThunkProc &&
+             left->data.pipe.from->data.thunk->kind == ThunkPipe) {
+        auto proc = left->data.pipe.to->data.thunk;
+        auto data = (typeof(*processes)){.name = proc->data.proc.name,
+                                         .argv = proc->data.proc.args};
+        arrpush(processes, data);
+        left = left->data.pipe.from->data.thunk;
+      }
+
+      if (left->data.pipe.to->data.thunk->kind == ThunkProc) {
+        auto data = (typeof(*processes)){
+            .name = left->data.pipe.to->data.thunk->data.proc.name,
+            .argv = left->data.pipe.to->data.thunk->data.proc.args};
+        arrpush(processes, data);
+
+        if (left->data.pipe.from->data.thunk->kind == ThunkProc) {
+          auto data = (typeof(*processes)){
+              .name = left->data.pipe.from->data.thunk->data.proc.name,
+              .argv = left->data.pipe.from->data.thunk->data.proc.args};
+          arrpush(processes, data);
+        } else {
+          eval_thunk(state, left->data.pipe.from->data.thunk, false);
+          left_value = &left->data.pipe.from->data.thunk->data.val;
+        }
+      } else {
+        eval_thunk(state, left, false);
+        left_value = &left->data.val;
+      }
+
+      size_t proc_count = arrlenu(processes);
+      if (left_value)
+        ++proc_count;
+
+      pid_t *pids = NULL;
+      arrsetlen(pids, proc_count);
+
+      size_t pipe_count = proc_count - 1;
+
+      int *pipe_fds = NULL;
+      arrsetlen(pipe_fds, 2 * pipe_count);
+
+      for (size_t i = 0; i < pipe_count; ++i)
+        pipe(&pipe_fds[2 * i]);
+
+      pid_t pgid = 0;
+
+      signal(SIGTTOU, SIG_IGN);
+      signal(SIGTTIN, SIG_IGN);
+
+      size_t i = 0;
+      if (left_value) {
+        pids[0] = fork();
+        if (pids[0] == 0) {
+          signal(SIGTTOU, SIG_DFL);
+          signal(SIGTTIN, SIG_DFL);
+          char *str = value_as_string(state, *left_value);
+          dup2(pipe_fds[1], STDOUT_FILENO);
+          for (size_t i = 0; i < arrlenu(pipe_fds); ++i)
+            close(pipe_fds[i]);
+          write(STDOUT_FILENO, str, arrlenu(str) - 1);
+          arrfree(str);
+          value_drop(state, *left_value);
+          exit(0);
+        }
+        setpgid(pids[0], pids[0]);
+        pgid = pids[0];
+        ++i;
+      }
+
+      for (; i < proc_count; ++i) {
+        pids[i] = fork();
+
+        if (pids[i] == 0) {
+          if (pgid == 0)
+            pgid = getpid();
+          setpgid(0, pgid);
+
+          if (i > 0) {
+            dup2(pipe_fds[2 * (i - 1)], STDIN_FILENO);
+          }
+
+          if (i < proc_count - 1) {
+            dup2(pipe_fds[2 * i + 1], STDOUT_FILENO);
+          }
+
+          for (size_t i = 0; i < arrlenu(pipe_fds); ++i)
+            close(pipe_fds[i]);
+
+          size_t cmd_idx = arrlenu(processes) - (left_value ? (i - 1) : i) - 1;
+          signal(SIGTTOU, SIG_DFL);
+          signal(SIGTTIN, SIG_DFL);
+          execv(processes[cmd_idx].name, processes[cmd_idx].argv);
+          exit(1);
+        }
+
+        if (pgid == 0)
+          pgid = pids[i];
+        setpgid(pids[i], pgid);
+      }
+
+      for (size_t i = 0; i < arrlenu(pipe_fds); ++i)
+        close(pipe_fds[i]);
+
+      if (is_termctl) {
+        tcsetpgrp(STDIN_FILENO, pgid);
+        bool suspended = false;
+        int status;
+        pid_t pid;
+        while ((pid = waitpid(-pgid, &status, WUNTRACED)) > 0) {
+          if (WIFSTOPPED(status)) {
+            suspended = true;
+          }
+        }
+        if (left_value) {
+          value_drop(state, *left_value);
+        }
+        tcsetpgrp(STDIN_FILENO, getpgrp());
+        signal(SIGTTOU, SIG_DFL);
+        signal(SIGTTIN, SIG_DFL);
+        *thunk =
+            (struct ThunkValue){.kind = ThunkVal, .data.val = value_void()};
+      } else {
+        assert(false && "TODO: Implement backgrounded pipe");
+      }
+
+      arrfree(pipe_fds);
+      arrfree(pids);
+      arrfree(processes);
     } break;
     case ThunkFunc: {
       struct Value from = value_real(state, thunk->data.pipe.from);
@@ -771,11 +930,7 @@ void eval_thunk(struct ProgramState *state, struct ThunkValue *thunk,
             var_from_value(&from));
 
       struct Value val = value_real(state, thunk->data.pipe.to);
-      free(thunk->data.pipe.from);
-      free(thunk->data.pipe.to);
-
-      struct ThunkValue next = {.kind = ThunkVal, .data.val = val};
-      *thunk = next;
+      *thunk = (struct ThunkValue){.kind = ThunkVal, .data.val = val};
     } break;
     case ThunkVal:
     case ThunkPipe:
@@ -784,6 +939,8 @@ void eval_thunk(struct ProgramState *state, struct ThunkValue *thunk,
     }
   } break;
   }
+
+  thunk_free(state, old);
 }
 
 struct Value value_real(struct ProgramState *state, struct Value *value) {

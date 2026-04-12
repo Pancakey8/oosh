@@ -89,12 +89,12 @@ executable oosh
     ld-options: -rdynamic
 
     if flag(debug)
-        cc-options:       -g -O0 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer
+        cc-options:       -std=gnu23 -g -O0 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer
         hsc2hs-options:   "--lflag=-fsanitize=address,undefined" "--cflag=-fsanitize=address,undefined"
         ghc-options:      -optc-fsanitize=address,undefined
                           -optl-fsanitize=address,undefined
     else
-        cc-options:       -O2
+        cc-options:       -std=gnu23 -Wall -Wextra -O2
         ghc-options:      -O2
 
     include-dirs:     csrc

@@ -23,7 +23,7 @@ main = do
         Right prog ->
           let ir = compileProg prog
           in do
-            mapM_ print ir
+            -- mapM_ print ir
             evalProgram state ir
         Left err -> print err
 
