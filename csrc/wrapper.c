@@ -497,12 +497,14 @@ struct ProgramState {
   struct Value *stb(stack);
 
   // Process jobs
-  struct Job *jobs;
+  struct Job **jobs;
   size_t *next_job;
 };
 
 struct ProgramState *init_program(void) {
   struct ProgramState *state = calloc(1, sizeof(typeof(*state)));
+  state->jobs = malloc(sizeof(struct Job *));
+  *state->jobs = NULL;
   state->next_job = malloc(sizeof(size_t));
   *state->next_job = 0;
   return state;
@@ -511,11 +513,13 @@ struct ProgramState *init_program(void) {
 struct Value program_var(struct ProgramState *state, char *name) {
   ptrdiff_t index;
   if ((index = shgeti(state->local, name)) >= 0) {
-    return value_shallowcpy(state->local[index].value->value);
+    struct Value v = value_shallowcpy(state->local[index].value->value);
+    return value_real(state, &v);
   }
 
   if ((index = shgeti(state->global, name)) >= 0) {
-    return value_shallowcpy(state->global[index].value->value);
+    struct Value v = value_shallowcpy(state->global[index].value->value);
+    return value_real(state, &v);
   }
 
   return value_void();
@@ -567,17 +571,17 @@ size_t job_add(struct ProgramState *state, pid_t pgid) {
   struct Job *job = malloc(sizeof(*job));
   job->pgid = pgid;
   job->jobid = (*state->next_job)++;
-  job->next = state->jobs;
-  state->jobs = job;
+  job->next = *state->jobs;
+  *state->jobs = job;
   return job->jobid;
 }
 
 struct Job *job_pop(struct ProgramState *state, size_t jobid) {
-  for (struct Job **job = &state->jobs; job; job = &(*job)->next) {
+  for (struct Job **job = state->jobs; *job; job = &(*job)->next) {
     if ((*job)->jobid == jobid) {
       struct Job *this = *job;
       *job = (*job)->next;
-      return *job;
+      return this;
     }
   }
 
@@ -585,14 +589,14 @@ struct Job *job_pop(struct ProgramState *state, size_t jobid) {
 }
 
 struct Job *job_find(struct ProgramState *state, size_t jobid) {
-  for (struct Job *job = state->jobs; job; job = job->next) {
+  for (struct Job *job = *state->jobs; job; job = job->next) {
     if (job->jobid == jobid)
       return job;
   }
   return NULL;
 }
 
-struct Job *job_begin(struct ProgramState *state) { return state->jobs; }
+struct Job *job_begin(struct ProgramState *state) { return *state->jobs; }
 
 char *stb(eval_tmps)(struct ProgramState *state, struct TemplatePart *parts,
                      size_t parts_length) {
@@ -885,7 +889,7 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
       assert(false && "TODO: Error handling, calling non-function value");
     }
 
-    struct ProgramState *subroutine = init_program();
+    struct ProgramState *subroutine = calloc(1, sizeof(struct ProgramState));
 
     // TODO: This might be fragile
     if (!callee.data.func.is_internal) {
@@ -909,7 +913,6 @@ void eval_instr(struct ProgramState *state, struct IRInstr instr) {
     }
 
     subroutine->jobs = state->jobs;
-    free(subroutine->next_job);
     subroutine->next_job = state->next_job;
 
     struct Value val = {.kind = ValThunk,
