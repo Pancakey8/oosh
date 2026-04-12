@@ -857,6 +857,10 @@ void eval_thunk(struct ProgramState *state, struct ThunkValue *thunk,
         pgid = pids[0];
         ++i;
       }
+     
+      int out[2];
+      if (!is_termctl)
+        pipe(out);
 
       for (; i < proc_count; ++i) {
         pids[i] = fork();
@@ -872,6 +876,10 @@ void eval_thunk(struct ProgramState *state, struct ThunkValue *thunk,
 
           if (i < proc_count - 1) {
             dup2(pipe_fds[2 * i + 1], STDOUT_FILENO);
+          } else if (!is_termctl) {
+            dup2(out[1], STDOUT_FILENO);
+            close(out[0]);
+            close(out[1]);
           }
 
           for (size_t i = 0; i < arrlenu(pipe_fds); ++i)
@@ -900,8 +908,15 @@ void eval_thunk(struct ProgramState *state, struct ThunkValue *thunk,
         while ((pid = waitpid(-pgid, &status, WUNTRACED)) > 0) {
           if (WIFSTOPPED(status)) {
             suspended = true;
+            break;
           }
         }
+
+        if (suspended) {
+          size_t jid = job_add(state, pgid);
+          printf("OOSH: Job %zu suspended\n", jid);
+        }
+
         if (left_value) {
           value_drop(state, *left_value);
         }
@@ -911,7 +926,22 @@ void eval_thunk(struct ProgramState *state, struct ThunkValue *thunk,
         *thunk =
             (struct ThunkValue){.kind = ThunkVal, .data.val = value_void()};
       } else {
-        assert(false && "TODO: Implement backgrounded pipe");
+        close(out[1]);
+
+        char *stb(output) = NULL;
+        char buffer[4096];
+        ssize_t bytes_read;
+
+        while ((bytes_read = read(out[0], buffer, sizeof(buffer))) > 0) {
+          size_t len = arrlenu(output);
+          arraddnindex(output, bytes_read);
+          memcpy(output + len, buffer, bytes_read);
+        }
+
+        arrpush(output, '\0');
+        close(out[0]);
+        *thunk = (struct ThunkValue){.kind = ThunkVal, .data.val = value_str(output)};
+        arrfree(output);
       }
 
       arrfree(pipe_fds);
